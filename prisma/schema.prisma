@@ -1,0 +1,166 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  HR
+  VIEWER
+}
+
+enum AttendanceStatus {
+  PRESENT
+  SHORT_TIME
+  HALF_DAY
+  ABSENT
+  LEAVE
+  MISSING_IN
+  MISSING_OUT
+  UNMARKED
+  OFF
+}
+
+enum LeaveType {
+  ANNUAL
+  SICK
+  CASUAL
+  EMERGENCY
+  UNPAID
+  WORK_FROM_HOME
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTH MODELS (NextAuth v5 required)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role     @default(VIEWER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  overrides  AttendanceRecord[] @relation("OverriddenBy")
+  auditLogs  AuditLog[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOMAIN MODELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Department {
+  id        String     @id @default(cuid())
+  code      Int        @unique  // matches original DEPTS id (10, 11, 12 …)
+  name      String
+  createdAt DateTime   @default(now())
+
+  employees Employee[]
+
+  @@map("departments")
+}
+
+model Employee {
+  id           String   @id @default(cuid())
+  empCode      String   @unique  // e.g. "200201" — from Crystal Report
+  name         String
+  designation  String
+  hcmId        String?  // secondary ID for Excel linking
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  departmentId String
+  department   Department @relation(fields: [departmentId], references: [id])
+
+  attendanceRecords AttendanceRecord[]
+
+  @@map("employees")
+}
+
+model AttendancePeriod {
+  id        String   @id @default(cuid())
+  label     String   // e.g. "March 2026"
+  startDate DateTime
+  endDate   DateTime
+  isActive  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  records AttendanceRecord[]
+
+  @@map("attendance_periods")
+}
+
+model AttendanceRecord {
+  id   String   @id @default(cuid())
+  date DateTime @db.Date
+
+  // Raw biometric punch data
+  inTime  String?  // "HH:MM" — nullable (missing punch)
+  outTime String?  // "HH:MM" — nullable (missing punch)
+
+  // Derived
+  workedMinutes Int?
+
+  // Status
+  calculatedStatus AttendanceStatus
+  overriddenStatus AttendanceStatus?
+  leaveType        LeaveType?
+  note             String?
+
+  // Override meta
+  overriddenAt DateTime?
+  overriddenBy   User?   @relation("OverriddenBy", fields: [overriddenById], references: [id])
+  overriddenById String?
+
+  // Relations
+  employee   Employee         @relation(fields: [employeeId], references: [id])
+  employeeId String
+  period     AttendancePeriod @relation(fields: [periodId], references: [id])
+  periodId   String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([employeeId, date])
+  @@map("attendance_records")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  action     String   // e.g. "OVERRIDE_STATUS", "BULK_MARK", "EMPLOYEE_CREATE"
+  entityType String   // e.g. "AttendanceRecord", "Employee"
+  entityId   String
+  before     Json?
+  after      Json?
+  createdAt  DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id])
+  userId String
+
+  @@map("audit_logs")
+}
+
+model EmailTemplate {
+  id        String   @id @default(cuid())
+  key       String   @unique  // e.g. "monthly_report", "absence_alert"
+  subject   String
+  htmlBody  String   @db.Text
+  variables String[] // e.g. ["employeeName", "period", "summary"]
+  updatedAt DateTime @updatedAt
+
+  @@map("email_templates")
+}
