@@ -6,8 +6,8 @@ import { format } from "date-fns"
 import { toast } from "sonner"
 import {
   X, Upload, FileSpreadsheet, AlertCircle,
-  CheckCircle2, Loader2, ArrowRight, Zap,
-} from "lucide-react"
+  CheckCircle2, Loader2, ArrowRight, Zap, Building2,
+} from "lucide-react"h
 import { cn } from "@/lib/utils"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -391,6 +391,7 @@ export function ImportSheet({ open, onClose, onImported }: ImportSheetProps) {
   const [checking,      setChecking]      = useState(false)
   const [importing,     setImporting]     = useState(false)
   const [result,        setResult]        = useState<ImportResult | null>(null)
+  const [newDepts,      setNewDepts]      = useState<string[]>([])
   const [dragging,      setDragging]      = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -398,7 +399,7 @@ export function ImportSheet({ open, onClose, onImported }: ImportSheetProps) {
   useEffect(() => {
     if (open) {
       setStep(1); setFile(null); setHeaders([]); setRawRows([])
-      setColMap({}); setAutoKeys(new Set()); setValidatedRows([]); setResult(null)
+      setColMap({}); setAutoKeys(new Set()); setValidatedRows([]); setResult(null); setNewDepts([])
     }
   }, [open])
 
@@ -452,10 +453,12 @@ export function ImportSheet({ open, onClose, onImported }: ImportSheetProps) {
         body:    JSON.stringify({ hcmIds, deptIdentifiers }),
       })
       if (!res.ok) throw new Error("Server validation failed.")
-      const { existingIds, deptMap } = await res.json() as {
+      const { existingIds, deptMap, newDepts: autoDepts = [] } = await res.json() as {
         existingIds: string[]
         deptMap:     Record<string, { id: string; name: string }>
+        newDepts:    string[]
       }
+      setNewDepts(autoDepts)
 
       const existingSet = new Set<string>(existingIds)
       const seenIds     = new Set<string>()
@@ -479,7 +482,7 @@ export function ImportSheet({ open, onClose, onImported }: ImportSheetProps) {
         // name (required)
         if (!row.name.trim()) errors.push("Full Name is required")
 
-        // department (required)
+        // department (required) — backend auto-creates unknown departments
         const dept = row.department.trim()
         if (!dept) {
           errors.push("Department is required")
@@ -487,9 +490,9 @@ export function ImportSheet({ open, onClose, onImported }: ImportSheetProps) {
           const found = deptMap[dept.toLowerCase()] ?? deptMap[dept]
           if (found) {
             departmentId = found.id
-          } else {
-            errors.push(`Department "${dept}" not found`)
           }
+          // If still not found (e.g. numeric code that doesn't exist),
+          // the backend will reject it — leave departmentId empty so the row errors
         }
 
         // CNIC format
@@ -929,7 +932,20 @@ export function ImportSheet({ open, onClose, onImported }: ImportSheetProps) {
                 </div>
               </div>
 
-              {hasErrors && (
+              {newDepts.length > 0 && (
+            <div className="flex items-start gap-2.5 p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl">
+              <Building2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-bold text-emerald-700">
+                  {newDepts.length} new department{newDepts.length !== 1 ? "s" : ""} auto-created
+                </p>
+                <p className="text-xs text-emerald-600 font-medium mt-0.5">
+                  {newDepts.join(", ")} — visible in Settings › Departments immediately.
+                </p>
+              </div>
+            </div>
+          )}
+          {hasErrors && (
                 <div className="flex items-start gap-2.5 p-3.5 bg-red-50 border border-red-200 rounded-xl">
                   <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
                   <div>
