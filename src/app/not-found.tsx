@@ -1,4 +1,5 @@
-import Link from "next/link"
+"use client"
+  import Link from "next/link"
 import { Clock4, Home, ArrowLeft } from "lucide-react"
 
 export default function NotFound() {
