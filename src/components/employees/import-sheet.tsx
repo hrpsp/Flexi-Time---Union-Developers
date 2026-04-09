@@ -7,7 +7,7 @@ import { toast } from "sonner"
 import {
   X, Upload, FileSpreadsheet, AlertCircle,
   CheckCircle2, Loader2, ArrowRight, Zap, Building2,
-} from "lucide-react"h
+} from "lucide-react"
 import { cn } from "@/lib/utils"
 
 // ─────────────────────────────────────────────────────────────────────────────
