@@ -1,194 +1,212 @@
-import { auth } from "@/lib/auth"
-import { prisma } from "@/lib/prisma"
-import { redirect } from "next/navigation"
-import { PageHeader } from "@/components/shared/page-header"
-import {
-  Users, Building2, Clock, CheckCircle2, XCircle,
-  AlertTriangle, CalendarOff, BarChart3,
-} from "lucide-react"
+import { redirect }   from "next/navigation"
+import { subDays, format } from "date-fns"
+import { auth }        from "@/lib/auth"
+import { hasPermission } from "@/lib/rbac"
+import { prisma }      from "@/lib/prisma"
+import { PageHeader }  from "@/components/layout/page-header"
+import { StatsCards }  from "@/components/dashboard/stats-cards"
+import { ActivePeriodBanner } from "@/components/dashboard/active-period-banner"
+import { AttendanceBarChart } from "@/components/dashboard/attendance-bar-chart"
+import { DailyTrendChart }    from "@/components/dashboard/daily-trend-chart"
+import { StatusDonutChart }   from "@/components/dashboard/status-donut-chart"
+import { QuickActions }  from "@/components/dashboard/quick-actions"
+import { ActivityFeed }  from "@/components/dashboard/activity-feed"
+import type { ByDeptData }  from "@/components/dashboard/attendance-bar-chart"
+import type { TrendData }   from "@/components/dashboard/daily-trend-chart"
+import type { DistData }    from "@/components/dashboard/status-donut-chart"
+import type { ActivityEntry } from "@/components/dashboard/activity-feed"
+import type { Role } from "@/types"
+import { BarChart3 } from "lucide-react"
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DATA FETCHING
-// ─────────────────────────────────────────────────────────────────────────────
-async function getDashboardStats() {
-  const [
-    totalEmployees,
-    activeDepts,
-    activePeriod,
-    statusCounts,
-  ] = await Promise.all([
-    prisma.employee.count({ where: { isActive: true } }),
-    prisma.department.count(),
-    prisma.attendancePeriod.findFirst({
-      where:   { isActive: true },
-      orderBy: { createdAt: "desc" },
+export const dynamic = "force-dynamic"
+export const metadata = { title: "Dashboard — Flexi Time" }
+
+export default async function DashboardPage() {
+  // ── Auth ───────────────────────────────────────────────────────────────────
+  const session = await auth()
+  if (!session?.user) redirect("/login")
+  const role = session.user.role as Role
+
+  // ── Today in PKT (UTC+5) ──────────────────────────────────────────────────
+  const todayStr  = new Date().toLocaleString("en-CA", { timeZone: "Asia/Karachi" }).split(",")[0]!
+  const todayDate = new Date(todayStr + "T00:00:00.000Z")
+
+  // ── Parallel base queries ─────────────────────────────────────────────────
+  const [activePeriod, totalEmployees, todayRecords, recentLogs] = await Promise.all([
+    prisma.attendancePeriod.findFirst({ where: { isActive: true } }),
+    prisma.employee.count({ where: { status: "ACTIVE" } }),
+    prisma.attendanceRecord.findMany({
+      where:  { date: todayDate },
+      select: { calculatedStatus: true, overriddenStatus: true },
     }),
-    prisma.attendanceRecord.groupBy({
-      by: ["calculatedStatus"],
-      _count: { calculatedStatus: true },
-      where: {
-        period: { isActive: true },
+    prisma.auditLog.findMany({
+      orderBy: { createdAt: "desc" },
+      take:    10,
+      select:  {
+        id:         true,
+        action:     true,
+        entityType: true,
+        createdAt:  true,
+        user:       { select: { name: true } },
       },
     }),
   ])
 
-  // Roll up status counts
-  const counts = Object.fromEntries(
-    statusCounts.map((r) => [r.calculatedStatus, r._count.calculatedStatus])
-  ) as Record<string, number>
+  // Today stats
+  const todayPresent = todayRecords.filter((r) =>
+    ["PRESENT", "SHORT_TIME", "HALF_DAY"].includes(
+      (r.overriddenStatus ?? r.calculatedStatus) as string
+    )
+  ).length
+  const todayAbsent = todayRecords.filter((r) =>
+    (r.overriddenStatus ?? r.calculatedStatus) === "ABSENT"
+  ).length
 
-  return { totalEmployees, activeDepts, activePeriod, counts }
-}
+  // ── Chart data (only if active period) ───────────────────────────────────
+  let pendingOverrides = 0
+  let byDepartment: ByDeptData[] = []
+  let distribution:  DistData[]  = []
+  let dailyTrend:    TrendData[]  = []
 
-// ─────────────────────────────────────────────────────────────────────────────
-// STAT CARD
-// ─────────────────────────────────────────────────────────────────────────────
-function StatCard({
-  label,
-  value,
-  icon: Icon,
-  color,
-  sub,
-}: {
-  label: string
-  value: number | string
-  icon:  React.ElementType
-  color: string
-  sub?:  string
-}) {
-  return (
-    <div className="bg-card border border-border rounded-xl p-5">
-      <div className="flex items-start justify-between">
-        <div>
-          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-1">{label}</p>
-          <p className={`text-3xl font-bold ${color}`}>{value}</p>
-          {sub && <p className="text-xs text-muted-foreground mt-1">{sub}</p>}
-        </div>
-        <div className={`p-2.5 rounded-lg bg-slate-800/60`}>
-          <Icon className={`w-5 h-5 ${color}`} />
-        </div>
-      </div>
-    </div>
-  )
-}
+  if (activePeriod) {
+    const thirtyAgo = subDays(new Date(), 30)
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PAGE
-// ─────────────────────────────────────────────────────────────────────────────
-export default async function DashboardPage() {
-  const session = await auth()
-  if (!session?.user) redirect("/login")
+    const [pending, periodRecords, trendRaw] = await Promise.all([
+      prisma.attendanceRecord.count({
+        where: {
+          periodId:         activePeriod.id,
+          calculatedStatus: "UNMARKED",
+          overriddenStatus: null,
+        },
+      }),
+      prisma.attendanceRecord.findMany({
+        where:  { periodId: activePeriod.id },
+        select: {
+          calculatedStatus: true,
+          overriddenStatus: true,
+          employee: { select: { department: { select: { name: true } } } },
+        },
+      }),
+      prisma.attendanceRecord.findMany({
+        where:  { date: { gte: thirtyAgo } },
+        select: { date: true, calculatedStatus: true, overriddenStatus: true },
+      }),
+    ])
 
-  const { totalEmployees, activeDepts, activePeriod, counts } =
-    await getDashboardStats()
+    pendingOverrides = pending
 
-  const totalRecords = Object.values(counts).reduce((a, b) => a + b, 0)
+    // ── By-department chart ─────────────────────────────────────────────────
+    const deptMap = new Map<string, Record<string, number>>()
+    for (const r of periodRecords) {
+      const dept   = r.employee?.department?.name ?? "Unassigned"
+      const status = (r.overriddenStatus ?? r.calculatedStatus) as string
+      if (!deptMap.has(dept)) deptMap.set(dept, {})
+      const d = deptMap.get(dept)!
+      d[status] = (d[status] ?? 0) + 1
+    }
+    byDepartment = Array.from(deptMap.entries()).map(([dept, counts]) => ({
+      dept,
+      ...counts,
+    } as ByDeptData))
+
+    // ── Status distribution ─────────────────────────────────────────────────
+    const statusMap = new Map<string, number>()
+    for (const r of periodRecords) {
+      const s = (r.overriddenStatus ?? r.calculatedStatus) as string
+      statusMap.set(s, (statusMap.get(s) ?? 0) + 1)
+    }
+    distribution = Array.from(statusMap.entries())
+      .filter(([, v]) => v > 0)
+      .map(([name, value]) => ({ name, value }))
+
+    // ── Daily trend (last 30 days) ──────────────────────────────────────────
+    const dayMap = new Map<string, { total: number; present: number }>()
+    for (const r of trendRaw) {
+      const key = r.date.toISOString().slice(0, 10)
+      const s   = (r.overriddenStatus ?? r.calculatedStatus) as string
+      if (!dayMap.has(key)) dayMap.set(key, { total: 0, present: 0 })
+      const d = dayMap.get(key)!
+      d.total++
+      if (["PRESENT", "SHORT_TIME", "HALF_DAY"].includes(s)) d.present++
+    }
+    dailyTrend = Array.from(dayMap.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, { total, present }]) => ({
+        date:       format(new Date(date + "T12:00:00Z"), "dd MMM"),
+        presentPct: total > 0 ? Math.round((present / total) * 1000) / 10 : 0,
+      }))
+  }
+
+  // ── Serialize activity feed ───────────────────────────────────────────────
+  const activity: ActivityEntry[] = recentLogs.map((log) => ({
+    id:         log.id,
+    action:     log.action,
+    entityType: log.entityType,
+    createdAt:  log.createdAt.toISOString(),
+    userName:   log.user.name,
+  }))
+
+  // ── Period info (serializable) ────────────────────────────────────────────
+  const periodInfo = activePeriod
+    ? {
+        id:        activePeriod.id,
+        label:     activePeriod.label,
+        startDate: activePeriod.startDate.toISOString().slice(0, 10),
+        endDate:   activePeriod.endDate.toISOString().slice(0, 10),
+      }
+    : null
+
+  const noChartData = !activePeriod
 
   return (
     <div>
       <PageHeader
-        title={`Welcome back, ${session.user.name?.split(" ")[0] ?? "Admin"}`}
-        description="Here's an overview of the current attendance period."
+        title="Dashboard"
+        description={`Welcome back, ${session.user.name} — ${new Date().toLocaleDateString("en-PK", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Karachi" })}`}
       />
 
-      {/* ── Period banner ──────────────────────────────────────────────────── */}
-      {activePeriod ? (
-        <div className="flex items-center gap-3 px-4 py-3 bg-indigo-600/10 border border-indigo-600/25 rounded-xl mb-6 text-sm">
-          <Clock className="w-4 h-4 text-indigo-400 shrink-0" />
-          <span className="text-indigo-300 font-medium">Active Period:</span>
-          <span className="text-white font-semibold">{activePeriod.label}</span>
-          <span className="text-slate-500 ml-auto hidden sm:block text-xs">
-            {new Date(activePeriod.startDate).toLocaleDateString("en-GB", { day: "numeric", month: "short" })}
-            {" – "}
-            {new Date(activePeriod.endDate).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })}
-          </span>
-        </div>
-      ) : (
-        <div className="flex items-center gap-3 px-4 py-3 bg-yellow-900/20 border border-yellow-700/30 rounded-xl mb-6 text-sm">
-          <AlertTriangle className="w-4 h-4 text-yellow-500 shrink-0" />
-          <span className="text-yellow-400">No active attendance period. Create one to start processing.</span>
-        </div>
-      )}
+      {/* Active period banner */}
+      <ActivePeriodBanner period={periodInfo} />
 
-      {/* ── Top stat cards ─────────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <StatCard
-          label="Active Employees"
-          value={totalEmployees}
-          icon={Users}
-          color="text-blue-400"
-          sub={`across ${activeDepts} departments`}
-        />
-        <StatCard
-          label="Total Records"
-          value={totalRecords}
-          icon={BarChart3}
-          color="text-indigo-400"
-          sub={activePeriod?.label ?? "no active period"}
-        />
-        <StatCard
-          label="Present"
-          value={counts.PRESENT ?? 0}
-          icon={CheckCircle2}
-          color="text-green-400"
-          sub="this period"
-        />
-        <StatCard
-          label="Absent"
-          value={counts.ABSENT ?? 0}
-          icon={XCircle}
-          color="text-red-400"
-          sub="this period"
-        />
-      </div>
+      {/* Stats row */}
+      <StatsCards
+        totalEmployees={totalEmployees}
+        todayPresent={todayPresent}
+        todayAbsent={todayAbsent}
+        pendingOverrides={pendingOverrides}
+      />
 
-      {/* ── Status breakdown ───────────────────────────────────────────────── */}
-      {totalRecords > 0 && (
-        <div className="bg-card border border-border rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-white mb-4">Status Breakdown — {activePeriod?.label}</h3>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {[
-              { key: "PRESENT",     label: "Present",     color: "#4ade80" },
-              { key: "SHORT_TIME",  label: "Short Time",  color: "#fbbf24" },
-              { key: "HALF_DAY",    label: "Half Day",    color: "#fb923c" },
-              { key: "ABSENT",      label: "Absent",      color: "#f87171" },
-              { key: "LEAVE",       label: "Leave",       color: "#60a5fa" },
-              { key: "MISSING_IN",  label: "Missing In",  color: "#c084fc" },
-              { key: "MISSING_OUT", label: "Missing Out", color: "#e879f9" },
-              { key: "UNMARKED",    label: "Unmarked",    color: "#6b7280" },
-            ].map(({ key, label, color }) => (
-              <div key={key} className="flex items-center justify-between py-2 px-3 bg-slate-800/40 rounded-lg">
-                <span className="text-xs text-slate-400">{label}</span>
-                <span className="text-sm font-bold" style={{ color }}>
-                  {counts[key] ?? 0}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── Quick actions (placeholder for Phase 3+) ───────────────────────── */}
-      <div className="mt-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
-        {[
-          { href: "/attendance",  icon: Clock,      label: "View Attendance Grid", desc: "Process and override daily records" },
-          { href: "/employees",   icon: Users,      label: "Manage Employees",     desc: "View, add, and update employee data" },
-          { href: "/reports",     icon: BarChart3,  label: "Export Reports",       desc: "Download CSV or Excel reports" },
-        ].map(({ href, icon: Icon, label, desc }) => (
-          <a
-            key={href}
-            href={href}
-            className="flex items-start gap-3 p-4 bg-card border border-border rounded-xl hover:border-indigo-600/40 hover:bg-indigo-600/5 transition-colors group"
-          >
-            <div className="p-2 rounded-lg bg-slate-800 group-hover:bg-indigo-600/20 transition-colors mt-0.5">
-              <Icon className="w-4 h-4 text-slate-400 group-hover:text-indigo-400 transition-colors" />
+      {/* Main content grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        {/* ── Left: charts (2/3 width) ─────────────────────────────────────── */}
+        <div className="lg:col-span-2 space-y-5">
+          {noChartData ? (
+            <div className="flex flex-col items-center justify-center py-20 bg-white rounded-2xl border border-border text-center">
+              <BarChart3 className="w-10 h-10 text-[#EEC293] mb-3" />
+              <p className="font-bold text-[#322E53]">No active period</p>
+              <p className="text-sm text-muted-foreground font-medium mt-1 max-w-xs">
+                Activate an attendance period to see department charts, daily trends, and status distribution.
+              </p>
             </div>
-            <div>
-              <p className="text-sm font-semibold text-white">{label}</p>
-              <p className="text-xs text-slate-500 mt-0.5">{desc}</p>
-            </div>
-          </a>
-        ))}
+          ) : (
+            <>
+              <AttendanceBarChart data={byDepartment} />
+              <DailyTrendChart    data={dailyTrend}   />
+              <StatusDonutChart   data={distribution} />
+            </>
+          )}
+        </div>
+
+        {/* ── Right: actions + activity (1/3 width) ───────────────────────── */}
+        <div className="space-y-5">
+          <QuickActions
+            canUpload={hasPermission(role, "attendance:upload")}
+            canReport={hasPermission(role, "reports:read")}
+            canAddEmployee={hasPermission(role, "employees:create")}
+            activePeriodId={periodInfo?.id ?? null}
+          />
+          <ActivityFeed logs={activity} />
+        </div>
       </div>
     </div>
   )

@@ -1,18 +1,50 @@
-import { PageHeader } from "@/components/shared/page-header"
-import { BarChart3 } from "lucide-react"
+import { redirect } from "next/navigation"
+import { auth } from "@/lib/auth"
+import { hasPermission } from "@/lib/rbac"
+import { prisma } from "@/lib/prisma"
+import { ReportsShell } from "@/components/reports/reports-shell"
+import type { PeriodOption, DeptOption } from "@/components/reports/reports-shell"
+import type { Role } from "@/types"
 
-export default function ReportsPage() {
+export const dynamic = "force-dynamic"
+export const metadata = { title: "Reports — Flexi Time" }
+
+export default async function ReportsPage() {
+  // ── Auth & permission ──────────────────────────────────────────────────────
+  const session = await auth()
+  if (!session?.user) redirect("/login")
+  if (!hasPermission(session.user.role as Role, "reports:read")) redirect("/dashboard")
+
+  const canExport = hasPermission(session.user.role as Role, "reports:export")
+
+  // ── Fetch periods (newest first) ───────────────────────────────────────────
+  const rawPeriods = await prisma.attendancePeriod.findMany({
+    orderBy: { startDate: "desc" },
+    select: { id: true, label: true },
+  })
+
+  const periods: PeriodOption[] = rawPeriods.map((p) => ({
+    id:    p.id,
+    label: p.label,
+  }))
+
+  // ── Fetch departments (alphabetical) ───────────────────────────────────────
+  const rawDepts = await prisma.department.findMany({
+    orderBy: { name: "asc" },
+    select: { id: true, name: true, code: true },
+  })
+
+  const departments: DeptOption[] = rawDepts.map((d) => ({
+    id:   d.id,
+    name: d.name,
+    code: d.code,
+  }))
+
   return (
-    <div>
-      <PageHeader
-        title="Reports"
-        description="Generate and export attendance summaries."
-      />
-      <div className="flex flex-col items-center justify-center py-24 text-center border border-dashed border-border rounded-xl bg-card/40">
-        <BarChart3 className="w-10 h-10 text-slate-600 mb-3" />
-        <p className="text-slate-400 font-medium">Coming in Phase 4</p>
-        <p className="text-slate-600 text-sm mt-1">Excel and CSV exports, per-employee summaries.</p>
-      </div>
-    </div>
+    <ReportsShell
+      periods={periods}
+      departments={departments}
+      canExport={canExport}
+    />
   )
 }

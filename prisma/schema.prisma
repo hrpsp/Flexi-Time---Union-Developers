@@ -13,8 +13,10 @@ datasource db {
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum Role {
+  SUPER_ADMIN
   ADMIN
-  HR
+  HR_MANAGER
+  HR_EXECUTIVE
   VIEWER
 }
 
@@ -23,9 +25,9 @@ enum AttendanceStatus {
   SHORT_TIME
   HALF_DAY
   ABSENT
-  LEAVE
   MISSING_IN
   MISSING_OUT
+  LEAVE
   UNMARKED
   OFF
 }
@@ -39,8 +41,47 @@ enum LeaveType {
   WORK_FROM_HOME
 }
 
+enum EmployeeStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum MaritalStatus {
+  MARRIED
+  UN_MARRIED
+}
+
+enum BloodGroup {
+  A_POS
+  A_NEG
+  B_POS
+  B_NEG
+  O_POS
+  O_NEG
+  AB_POS
+  AB_NEG
+}
+
+enum Religion {
+  ISLAM
+  CHRISTIAN
+  OTHER
+}
+
+enum Division {
+  SUPPORT_SERVICES
+  INFRASTRUCTURE
+  CONSTRUCTION
+  COMMERCIAL
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// AUTH MODELS (NextAuth v5 required)
+// MODELS
 // ─────────────────────────────────────────────────────────────────────────────
 
 model User {
@@ -49,6 +90,7 @@ model User {
   passwordHash String
   name         String
   role         Role     @default(VIEWER)
+  isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -58,14 +100,11 @@ model User {
   @@map("users")
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DOMAIN MODELS
-// ─────────────────────────────────────────────────────────────────────────────
-
 model Department {
   id        String     @id @default(cuid())
-  code      Int        @unique  // matches original DEPTS id (10, 11, 12 …)
+  code      Int        @unique
   name      String
+  isActive  Boolean    @default(true)
   createdAt DateTime   @default(now())
 
   employees Employee[]
@@ -74,26 +113,78 @@ model Department {
 }
 
 model Employee {
-  id           String   @id @default(cuid())
-  empCode      String   @unique  // e.g. "200201" — from Crystal Report
-  name         String
-  designation  String
-  hcmId        String?  // secondary ID for Excel linking
-  isActive     Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id   String @id @default(cuid())
 
-  departmentId String
-  department   Department @relation(fields: [departmentId], references: [id])
+  // ── Identifiers ──────────────────────────────────────────────────────────
+  hcmId             String         @unique
+  cnic              String?        @unique
 
-  attendanceRecords AttendanceRecord[]
+  // ── Personal Info ─────────────────────────────────────────────────────────
+  name              String
+  fatherName        String?
+  gender            Gender?
+  dateOfBirth       DateTime?
+  maritalStatus     MaritalStatus?
+  bloodGroup        BloodGroup?
+  religion          Religion?
+  education         String?
+  contactNumber     String?
+  email             String?
+  address           String?
+
+  // ── Emergency / NOK ───────────────────────────────────────────────────────
+  nokName           String?
+  nokRelation       String?
+  emergencyContact  String?
+
+  // ── Employment Details ─────────────────────────────────────────────────────
+  designation       String?
+  grade             String?
+  pgcGrade          String?
+  doj               DateTime?
+  confirmationDate  DateTime?
+  division          Division?
+  project           String?
+
+  // ── CNIC Validity ──────────────────────────────────────────────────────────
+  cnicIssueDate     DateTime?
+  cnicExpiryDate    DateTime?
+
+  // ── Org Structure ──────────────────────────────────────────────────────────
+  departmentId      String
+  subDepartment     String?
+
+  // ── Status ─────────────────────────────────────────────────────────────────
+  status            EmployeeStatus @default(ACTIVE)
+  dol               DateTime?
+  rejoiningDate     DateTime?
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+
+  department        Department              @relation(fields: [departmentId], references: [id])
+  attendance        AttendanceRecord[]
+  statusHistory     EmployeeStatusHistory[]
 
   @@map("employees")
 }
 
+model EmployeeStatusHistory {
+  id            String         @id @default(cuid())
+  employeeId    String
+  status        EmployeeStatus
+  effectiveDate DateTime
+  reason        String?
+  createdAt     DateTime       @default(now())
+
+  employee Employee @relation(fields: [employeeId], references: [id])
+
+  @@map("employee_status_history")
+}
+
 model AttendancePeriod {
   id        String   @id @default(cuid())
-  label     String   // e.g. "March 2026"
+  label     String
   startDate DateTime
   endDate   DateTime
   isActive  Boolean  @default(false)
@@ -105,35 +196,25 @@ model AttendancePeriod {
 }
 
 model AttendanceRecord {
-  id   String   @id @default(cuid())
-  date DateTime @db.Date
-
-  // Raw biometric punch data
-  inTime  String?  // "HH:MM" — nullable (missing punch)
-  outTime String?  // "HH:MM" — nullable (missing punch)
-
-  // Derived
-  workedMinutes Int?
-
-  // Status
+  id               String            @id @default(cuid())
+  employeeId       String
+  periodId         String
+  date             DateTime          @db.Date
+  inTime           String?
+  outTime          String?
+  workedMinutes    Int?
   calculatedStatus AttendanceStatus
   overriddenStatus AttendanceStatus?
   leaveType        LeaveType?
   note             String?
+  overriddenById   String?
+  overriddenAt     DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
 
-  // Override meta
-  overriddenAt DateTime?
-  overriddenBy   User?   @relation("OverriddenBy", fields: [overriddenById], references: [id])
-  overriddenById String?
-
-  // Relations
-  employee   Employee         @relation(fields: [employeeId], references: [id])
-  employeeId String
-  period     AttendancePeriod @relation(fields: [periodId], references: [id])
-  periodId   String
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  employee     Employee         @relation(fields: [employeeId], references: [id])
+  period       AttendancePeriod @relation(fields: [periodId], references: [id])
+  overriddenBy User?            @relation("OverriddenBy", fields: [overriddenById], references: [id])
 
   @@unique([employeeId, date])
   @@map("attendance_records")
@@ -141,26 +222,40 @@ model AttendanceRecord {
 
 model AuditLog {
   id         String   @id @default(cuid())
-  action     String   // e.g. "OVERRIDE_STATUS", "BULK_MARK", "EMPLOYEE_CREATE"
-  entityType String   // e.g. "AttendanceRecord", "Employee"
+  userId     String
+  action     String
+  entityType String
   entityId   String
   before     Json?
   after      Json?
   createdAt  DateTime @default(now())
 
-  user   User   @relation(fields: [userId], references: [id])
-  userId String
+  user User @relation(fields: [userId], references: [id])
 
   @@map("audit_logs")
 }
 
 model EmailTemplate {
   id        String   @id @default(cuid())
-  key       String   @unique  // e.g. "monthly_report", "absence_alert"
+  key       String   @unique
   subject   String
   htmlBody  String   @db.Text
-  variables String[] // e.g. ["employeeName", "period", "summary"]
+  variables String[]
   updatedAt DateTime @updatedAt
 
   @@map("email_templates")
+}
+
+model ShiftConfig {
+  id             String  @id @default(cuid())
+  name           String
+  startTime      String
+  endTime        String
+  graceMinutes   Int     @default(15)
+  presentMinutes Int     @default(465)
+  shortTimeMin   Int     @default(391)
+  halfDayMin     Int     @default(240)
+  isDefault      Boolean @default(false)
+
+  @@map("shift_configs")
 }

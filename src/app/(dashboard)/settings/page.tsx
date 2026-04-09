@@ -1,18 +1,25 @@
-import { PageHeader } from "@/components/shared/page-header"
-import { Settings } from "lucide-react"
+import { redirect } from "next/navigation"
+import { auth }           from "@/lib/auth"
+import { hasPermission }  from "@/lib/rbac"
+import { PageHeader }     from "@/components/layout/page-header"
+import { SettingsShell }  from "@/components/settings/settings-shell"
+import type { Role }      from "@/types"
 
-export default function SettingsPage() {
+export const dynamic = "force-dynamic"
+export const metadata = { title: "Settings — Flexi Time" }
+
+export default async function SettingsPage() {
+  const session = await auth()
+  if (!session?.user) redirect("/login")
+  if (!hasPermission(session.user.role as Role, "settings:manage")) redirect("/dashboard")
+
   return (
     <div>
       <PageHeader
         title="Settings"
-        description="Application configuration (Admin only)."
+        description="Configure shifts, departments, email templates, and system preferences."
       />
-      <div className="flex flex-col items-center justify-center py-24 text-center border border-dashed border-border rounded-xl bg-card/40">
-        <Settings className="w-10 h-10 text-slate-600 mb-3" />
-        <p className="text-slate-400 font-medium">Coming soon</p>
-        <p className="text-slate-600 text-sm mt-1">SMTP config, shift rules, email templates.</p>
-      </div>
+      <SettingsShell />
     </div>
   )
 }

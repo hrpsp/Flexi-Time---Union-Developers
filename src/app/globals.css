@@ -3,71 +3,82 @@
 @tailwind utilities;
 
 /*
-  CSS variables are set to dark values by default.
-  This app is dark-themed only (matches the original index.html).
+  Flexi Time — light theme with brand palette
+  Primary:  #322E53 (dark purple)
+  Mid:      #49426E
+  Peach:    #EEC293
+  Salmon:   #F3AB9D
+  BG:       #F5F4F8
 */
 @layer base {
   :root {
-    --background: 222 47% 5%;         /* #0a0e1a */
-    --foreground: 210 40% 96%;
+    --background: 0 0% 96%;           /* ~#F5F4F8 */
+    --foreground: 250 30% 15%;        /* near #322E53 */
 
-    --card: 222 47% 7%;               /* slightly lighter than background */
-    --card-foreground: 210 40% 96%;
+    --card: 0 0% 100%;
+    --card-foreground: 250 30% 15%;
 
-    --popover: 222 47% 7%;
-    --popover-foreground: 210 40% 96%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 250 30% 15%;
 
-    --primary: 239 84% 67%;           /* indigo-500 */
-    --primary-foreground: 210 40% 98%;
+    --primary: 250 28% 25%;           /* #322E53 */
+    --primary-foreground: 37 70% 75%; /* #EEC293 */
 
-    --secondary: 217 33% 17%;
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 248 25% 35%;         /* #49426E */
+    --secondary-foreground: 0 0% 100%;
 
-    --muted: 217 33% 15%;
-    --muted-foreground: 215 20% 50%;
+    --muted: 250 20% 94%;
+    --muted-foreground: 250 15% 50%;
 
-    --accent: 217 33% 17%;
-    --accent-foreground: 210 40% 98%;
+    --accent: 37 70% 75%;             /* #EEC293 peach */
+    --accent-foreground: 250 28% 25%;
 
-    --destructive: 0 63% 31%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 217 33% 15%;
-    --input: 217 33% 15%;
-    --ring: 239 84% 67%;
+    --border: 250 20% 88%;
+    --input:  250 20% 92%;
+    --ring:   250 28% 25%;
 
     --radius: 0.5rem;
 
-    /* Sidebar */
-    --sidebar-bg: 222 47% 6%;
-    --sidebar-border: 217 33% 12%;
-    --sidebar-width: 240px;
-    --topbar-height: 56px;
+    /* Layout dimensions */
+    --sidebar-width: 232px;
+    --topbar-height: 60px;
   }
 }
 
 @layer base {
   * {
     @apply border-border;
+    box-sizing: border-box;
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply bg-brand-bg text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
   }
 
-  /* Custom scrollbars — matches original */
+  /* Scrollbars */
   ::-webkit-scrollbar        { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-track  { @apply bg-background; }
-  ::-webkit-scrollbar-thumb  { @apply bg-border rounded-full; }
-  ::-webkit-scrollbar-thumb:hover { @apply bg-muted-foreground; }
+  ::-webkit-scrollbar-track  { background: transparent; }
+  ::-webkit-scrollbar-thumb  { background: #c7c2d6; border-radius: 99px; }
+  ::-webkit-scrollbar-thumb:hover { background: #49426E; }
 }
 
-/* ── Attendance grid status cell styles ──────────────────────────────────── */
 @layer components {
-  .status-cell {
-    @apply inline-flex items-center justify-center rounded px-1.5 py-0.5
-           text-[11px] font-bold leading-none border transition-colors
-           cursor-pointer select-none;
+  /* Sidebar nav item base */
+  .nav-item {
+    @apply flex items-center gap-3 px-4 py-2.5 mx-3 rounded-lg
+           text-sm font-medium text-white/70
+           hover:text-white hover:bg-[#49426E]
+           transition-colors cursor-pointer select-none;
+  }
+
+  /* Active sidebar nav item */
+  .nav-item-active {
+    @apply text-white bg-[#49426E]
+           border-l-2 border-brand-peach
+           pl-[14px];   /* compensate for 2px border */
   }
 }

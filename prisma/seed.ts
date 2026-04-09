@@ -3,6 +3,9 @@ import bcrypt from "bcryptjs"
 
 const prisma = new PrismaClient()
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DEPARTMENTS  (28 departments — codes match the original attendance tool)
+// ─────────────────────────────────────────────────────────────────────────────
 const DEPARTMENTS = [
   { code: 10, name: "Accounts & Finance" },
   { code: 11, name: "Administration" },
@@ -34,70 +37,94 @@ const DEPARTMENTS = [
   { code: 38, name: "Town Planning" },
 ]
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MAIN
+// ─────────────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log("🌱 Seeding database…")
+  console.log("\n🌱  Starting seed…\n")
 
-  // ── 1. Admin user ─────────────────────────────────────────────────────────
-  const adminEmail = "admin@uniondev.com"
-  const existing = await prisma.user.findUnique({ where: { email: adminEmail } })
+  // ── 1. Super Admin ─────────────────────────────────────────────────────────
+  const adminEmail = "admin@flexitime.com"
+  const existing   = await prisma.user.findUnique({ where: { email: adminEmail } })
 
-  if (!existing) {
-    const hash = await bcrypt.hash("Admin@1234", 12)
+  if (existing) {
+    console.log(`  ⏭  Super Admin already exists — skipping (${adminEmail})`)
+  } else {
+    const hash = await bcrypt.hash("Admin@123", 12)
     await prisma.user.create({
       data: {
         email:        adminEmail,
         passwordHash: hash,
         name:         "System Admin",
-        role:         Role.ADMIN,
+        role:         Role.SUPER_ADMIN,
+        isActive:     true,
       },
     })
-    console.log(`  ✔ Admin user created: ${adminEmail} / Admin@1234`)
-  } else {
-    console.log(`  – Admin user already exists (${adminEmail}), skipping.`)
+    console.log(`  ✔  Super Admin created`)
+    console.log(`     Email:    ${adminEmail}`)
+    console.log(`     Password: Admin@123`)
   }
 
-  // ── 2. Departments ────────────────────────────────────────────────────────
-  let created = 0
-  let skipped = 0
+  // ── 2. Departments ─────────────────────────────────────────────────────────
+  console.log("\n  Upserting departments…")
+  let deptCreated = 0
+  let deptUpdated = 0
 
   for (const dept of DEPARTMENTS) {
     const result = await prisma.department.upsert({
       where:  { code: dept.code },
-      update: { name: dept.name },
-      create: { code: dept.code, name: dept.name },
+      update: { name: dept.name, isActive: true },
+      create: { code: dept.code, name: dept.name, isActive: true },
     })
-    result ? created++ : skipped++
+    // Prisma upsert always returns the record; we track by checking if createdAt ≈ updatedAt
+    const isNew = Math.abs(result.createdAt.getTime() - Date.now()) < 3000
+    if (isNew) deptCreated++; else deptUpdated++
+
+    console.log(`     [${String(dept.code).padStart(2, " ")}]  ${dept.name}`)
   }
-  console.log(`  ✔ Departments upserted: ${DEPARTMENTS.length}`)
 
-  // ── 3. Active attendance period ───────────────────────────────────────────
-  const period = await prisma.attendancePeriod.upsert({
-    where: {
-      // Use label as the unique selector for upsert (no @unique on label in schema,
-      // so we use findFirst + create pattern instead)
-      id: "seed-period-mar-apr-2026",
-    },
-    update: {},
-    create: {
-      id:        "seed-period-mar-apr-2026",
-      label:     "Mar 21 – Apr 08, 2026",
-      startDate: new Date("2026-03-21"),
-      endDate:   new Date("2026-04-08"),
-      isActive:  true,
-    },
-  })
-  console.log(`  ✔ Attendance period: "${period.label}" (active)`)
+  // ── 3. Default Shift Config ────────────────────────────────────────────────
+  console.log("\n  Upserting default shift config…")
+  const shift = await prisma.shiftConfig.findFirst({ where: { isDefault: true } })
 
-  console.log("\n✅ Seed complete.")
-  console.log("   Login: admin@uniondev.com  /  Admin@1234")
-  console.log("   Change this password immediately after first login!\n")
+  if (shift) {
+    console.log("  ⏭  Default shift already exists — skipping")
+  } else {
+    await prisma.shiftConfig.create({
+      data: {
+        name:           "Standard Shift",
+        startTime:      "10:00",
+        endTime:        "18:00",
+        graceMinutes:   15,
+        presentMinutes: 465,   // 7h 45m
+        shortTimeMin:   391,   // 6h 31m
+        halfDayMin:     240,   // 4h 00m
+        isDefault:      true,
+      },
+    })
+    console.log("  ✔  Default shift: 10:00–18:00, 15 min grace")
+  }
+
+  // ── Summary ────────────────────────────────────────────────────────────────
+  const [userCount, deptCount, shiftCount] = await Promise.all([
+    prisma.user.count(),
+    prisma.department.count(),
+    prisma.shiftConfig.count(),
+  ])
+
+  console.log("\n  ─────────────────────────────────────")
+  console.log("  📊  Database totals after seed:")
+  console.log(`      Users:       ${userCount}`)
+  console.log(`      Departments: ${deptCount}`)
+  console.log(`      Shifts:      ${shiftCount}`)
+  console.log("  ─────────────────────────────────────")
+  console.log("\n✅  Seed complete!\n")
+  console.log("  ⚠  Change the admin password after first login.\n")
 }
 
 main()
   .catch((e) => {
-    console.error("❌ Seed failed:", e)
+    console.error("\n❌  Seed failed:", e)
     process.exit(1)
   })
-  .finally(async () => {
-    await prisma.$disconnect()
-  })
+  .finally(() => prisma.$disconnect())

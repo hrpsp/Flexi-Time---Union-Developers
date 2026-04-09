@@ -1,18 +1,18 @@
-import { PageHeader } from "@/components/shared/page-header"
-import { Users } from "lucide-react"
+import { redirect } from "next/navigation"
+import { auth } from "@/lib/auth"
+import { hasPermission } from "@/lib/rbac"
+import { EmployeeTable } from "@/components/employees/employee-table"
 
-export default function EmployeesPage() {
+export const metadata = { title: "Employees — Flexi Time" }
+
+export default async function EmployeesPage() {
+  const session = await auth()
+  if (!session) redirect("/login")
+  if (!hasPermission(session.user.role, "employees:read")) redirect("/dashboard")
+
   return (
-    <div>
-      <PageHeader
-        title="Employees"
-        description="Manage employee records, designations, and department assignments."
-      />
-      <div className="flex flex-col items-center justify-center py-24 text-center border border-dashed border-border rounded-xl bg-card/40">
-        <Users className="w-10 h-10 text-slate-600 mb-3" />
-        <p className="text-slate-400 font-medium">Coming in Phase 2</p>
-        <p className="text-slate-600 text-sm mt-1">Employee list, Excel import, and detail views.</p>
-      </div>
+    <div className="p-6 max-w-7xl mx-auto">
+      <EmployeeTable />
     </div>
   )
 }

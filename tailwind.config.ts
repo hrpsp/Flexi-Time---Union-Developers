@@ -16,58 +16,62 @@ const config: Config = {
       screens: { "2xl": "1400px" },
     },
     extend: {
+      // ── Flexi IT Services brand palette ────────────────────────────────
       colors: {
-        border: "hsl(var(--border))",
-        input: "hsl(var(--input))",
-        ring: "hsl(var(--ring))",
+        brand: {
+          purple:    "#322E53",   // primary dark purple — sidebar, buttons
+          "mid-purple": "#49426E", // mid purple — hover states, active bg
+          peach:     "#EEC293",   // peach accent — logo text, active border, CTA hover
+          salmon:    "#F3AB9D",   // salmon accent — secondary highlights
+          bg:        "#F5F4F8",   // main content background
+        },
+        // shadcn/ui CSS variable tokens (light mode only — app is light)
+        border:     "hsl(var(--border))",
+        input:      "hsl(var(--input))",
+        ring:       "hsl(var(--ring))",
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
         primary: {
-          DEFAULT: "hsl(var(--primary))",
+          DEFAULT:    "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
         },
         secondary: {
-          DEFAULT: "hsl(var(--secondary))",
+          DEFAULT:    "hsl(var(--secondary))",
           foreground: "hsl(var(--secondary-foreground))",
         },
         destructive: {
-          DEFAULT: "hsl(var(--destructive))",
+          DEFAULT:    "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
         },
         muted: {
-          DEFAULT: "hsl(var(--muted))",
+          DEFAULT:    "hsl(var(--muted))",
           foreground: "hsl(var(--muted-foreground))",
         },
         accent: {
-          DEFAULT: "hsl(var(--accent))",
+          DEFAULT:    "hsl(var(--accent))",
           foreground: "hsl(var(--accent-foreground))",
         },
         popover: {
-          DEFAULT: "hsl(var(--popover))",
+          DEFAULT:    "hsl(var(--popover))",
           foreground: "hsl(var(--popover-foreground))",
         },
         card: {
-          DEFAULT: "hsl(var(--card))",
+          DEFAULT:    "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
-        // Attendance status colours (matches index.html exactly)
-        status: {
-          present:      { bg: "#052e16", text: "#4ade80", border: "#166534" },
-          "short-time": { bg: "#1c1208", text: "#fbbf24", border: "#854d0e" },
-          "half-day":   { bg: "#1c0a00", text: "#fb923c", border: "#9a3412" },
-          absent:       { bg: "#1c0000", text: "#f87171", border: "#991b1b" },
-          leave:        { bg: "#020c1f", text: "#60a5fa", border: "#1e40af" },
-          "missing-in": { bg: "#0d0520", text: "#c084fc", border: "#6b21a8" },
-          "missing-out":{ bg: "#160320", text: "#e879f9", border: "#86198f" },
-          unmarked:     { bg: "#111827", text: "#6b7280", border: "#374151" },
-          off:          { bg: "#0c111b", text: "#1e293b", border: "#1e293b" },
-        },
       },
+
+      // ── League Spartan as default sans ──────────────────────────────────
+      fontFamily: {
+        sans: ["var(--font-league-spartan)", "system-ui", "sans-serif"],
+      },
+
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+
       keyframes: {
         "accordion-down": {
           from: { height: "0" },
@@ -80,7 +84,7 @@ const config: Config = {
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
-        "accordion-up": "accordion-up 0.2s ease-out",
+        "accordion-up":   "accordion-up 0.2s ease-out",
       },
     },
   },

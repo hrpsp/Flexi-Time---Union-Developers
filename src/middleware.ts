@@ -1,13 +1,19 @@
 import NextAuth from "next-auth"
-import authConfig from "@/auth.config"
+import authConfig from "@/lib/auth.config"
 
 const { auth } = NextAuth(authConfig)
 
 export default auth
 
 export const config = {
-  // Run middleware on all routes except static files and Next.js internals
   matcher: [
+    /*
+     * Match all paths EXCEPT:
+     *   - _next/static  (Next.js build assets)
+     *   - _next/image   (Next.js image optimisation)
+     *   - favicon.ico
+     *   - public image files
+     */
     "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 }

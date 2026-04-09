@@ -1,9 +1,10 @@
+/**
+ * Prisma client singleton.
+ * ⚠ DATABASE_URL not yet configured — add to .env.local before running any DB calls.
+ */
 import { PrismaClient } from "@prisma/client"
 
-// Prevent multiple PrismaClient instances in development (hot-reload safe)
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined
-}
+const globalForPrisma = globalThis as unknown as { prisma: PrismaClient | undefined }
 
 export const prisma =
   globalForPrisma.prisma ??

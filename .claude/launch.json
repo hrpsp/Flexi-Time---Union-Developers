@@ -1,0 +1,14 @@
+{
+    "version":  "0.0.1",
+    "configurations":  [
+                           {
+                               "port":  3000,
+                               "runtimeExecutable":  "npm",
+                               "name":  "flexi-time",
+                               "runtimeArgs":  [
+                                                   "run",
+                                                   "dev"
+                                               ]
+                           }
+                       ]
+}
