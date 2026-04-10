@@ -476,8 +476,8 @@ export function UploadDialog({ open, onClose, periods, onSynced }: UploadDialogP
   function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return
     const f = files[0]
-    if (!f.name.match(/\.(xlsx|xls|xlsm)$/i)) {
-      setParseError("Please upload an Excel file (.xlsx, .xls, .xlsm).")
+    if (!f.name.match(/\.(xlsx|xls|xlsm|pdf)$/i)) {
+      setParseError("Please upload an Excel or PDF file (.xlsx, .xls, .xlsm, .pdf).")
       return
     }
     setFile(f); setParseError(null); setParseResult(null)
@@ -490,9 +490,36 @@ export function UploadDialog({ open, onClose, periods, onSynced }: UploadDialogP
 
   async function handleParse() {
     if (!periodId) { setParseError("Please select an attendance period."); return }
-    if (!file) { setParseError("Please upload an Excel file."); return }
+    if (!file) { setParseError("Please upload an Excel or PDF file."); return }
     setParsing(true); setParseError(null)
     try {
+    // ── PDF file: route to server-side PDF parser ─────────────────────────
+    if (file.name.toLowerCase().endsWith(".pdf")) {
+      const fd = new FormData()
+      fd.append("file", file)
+      const pdfRes = await fetch("/api/attendance/parse-pdf", { method: "POST", body: fd })
+      const pdfData = await pdfRes.json()
+      if (!pdfRes.ok) throw new Error(pdfData.error ?? "PDF parsing failed.")
+      const result = pdfData as ParseResult
+      if (result.rows.length === 0) {
+        setParseError("No records found in the PDF. Please check the format and try again.")
+        return
+      }
+      setParseResult(result)
+      setMatching(true)
+      const res = await fetch("/api/attendance/match-employees", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ codes: result.codes }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error ?? "Matching failed.")
+      setMatchResults(data.results)
+      setStep(2)
+      return
+    }
+
+    // ── Excel file: parse client-side ─────────────────────────────────────
       const result = await parseWorkbook(file)
       if (result.rows.length === 0) {
         setParseError("No records found in the file. Please check the format and try again.")
@@ -587,7 +614,7 @@ export function UploadDialog({ open, onClose, periods, onSynced }: UploadDialogP
             </div>
             <div>
               <h2 className="text-sm font-extrabold text-[#322E53]">Upload Attendance Data</h2>
-              <p className="text-xs text-muted-foreground font-medium">Crystal Report Excel Import</p>
+              <p className="text-xs text-muted-foreground font-medium">Crystal Report Excel / PDF Import</p>
             </div>
           </div>
           <button
@@ -623,7 +650,7 @@ export function UploadDialog({ open, onClose, periods, onSynced }: UploadDialogP
               </div>
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-[#49426E] mb-1.5">
-                  Excel File <span className="text-red-400">*</span>
+                  Excel / PDF File <span className="text-red-400">*</span>
                 </label>
                 <div
                   onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
@@ -637,7 +664,7 @@ export function UploadDialog({ open, onClose, periods, onSynced }: UploadDialogP
                       : "border-border hover:border-[#322E53]/40 hover:bg-[#F5F4F8]/50"
                   )}
                 >
-                  <input ref={fileRef} type="file" accept=".xlsx,.xls,.xlsm" className="hidden"
+                  <input ref={fileRef} type="file" accept=".xlsx,.xls,.xlsm,.pdf" className="hidden"
                     onChange={(e) => handleFiles(e.target.files)} />
                   {file ? (
                     <div className="flex items-center justify-center gap-3">
@@ -654,7 +681,7 @@ export function UploadDialog({ open, onClose, periods, onSynced }: UploadDialogP
                       <Upload className="w-8 h-8 text-slate-300 mx-auto mb-3" />
                       <p className="font-semibold text-[#322E53] text-sm">Drop your Excel file here</p>
                       <p className="text-xs text-muted-foreground font-medium mt-1">
-                        or click to browse — .xlsx, .xls, .xlsm supported
+                        or click to browse — .xlsx, .xls, .xlsm, .pdf supported
                       </p>
                     </>
                   )}
