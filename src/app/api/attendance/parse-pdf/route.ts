@@ -21,6 +21,9 @@ export async function POST(req: Request) {
   const guard = await withPermission("attendance:upload")
   if (guard) return guard
 
+  const url = new URL(req.url)
+  const debug = url.searchParams.get("debug") === "1"
+
   let formData: FormData
   try {
     formData = await req.formData()
@@ -37,7 +40,26 @@ export async function POST(req: Request) {
 
   try {
     const buffer = Buffer.from(await file.arrayBuffer())
-    const result = await parseCrystalReportPdf(buffer)
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const pdfParse = ((await import("pdf-parse" as any)).default) as (
+      buf: Buffer,
+      options?: Record<string, unknown>
+    ) => Promise<{ text: string; numpages: number }>
+
+    const data = await pdfParse(buffer)
+    const fullText = data.text
+
+    if (!fullText.trim()) {
+      throw new Error("PDF appears to be empty or image-only (scanned). Text extraction requires a digital PDF.")
+    }
+
+    // Debug mode: return the raw extracted text so we can inspect it
+    if (debug) {
+      return json({ debug: true, numpages: data.numpages, text: fullText.slice(0, 8000) })
+    }
+
+    const result = await parseCrystalReportPdf(fullText)
     return json(result)
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to parse PDF."
@@ -45,76 +67,29 @@ export async function POST(req: Request) {
   }
 }
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Crystal Report text parser ───────────────────────────────────────────────
+//
+// pdf-parse extracts text in reading order. For Crystal Reports, this means:
+// The header lines come first, then for each department:
+//   - A row of day numbers (like "21 22 23 24 25 26 27 28 29 30 31 01 02...")
+//   - A row of day abbreviations (Sat Sun Mon Tue...)
+//   - Employee pairs: HCM ID / Name row with in-times, followed by out-times row
+//
+// Key: pdf-parse preserves spacing, so day numbers appear as space-separated
+// single or two-digit numbers. The employee HCM ID is always 5-6 digits at
+// the start of the line.
 
-interface TextItem {
-  str: string
-  /** Approximate X position bucket (column index based on tab stops) */
-  x: number
-  /** Line number within the page */
-  y: number
-}
-
-// ── Core PDF parser using pdf-parse ─────────────────────────────────────────
-
-async function parseCrystalReportPdf(buffer: Buffer): Promise<ParseResult> {
-  // pdf-parse is a pure-Node.js PDF text extractor — no web worker needed
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pdfParse = (await import("pdf-parse" as any)).default as (
-    buf: Buffer,
-    options?: Record<string, unknown>
-  ) => Promise<{ text: string; numpages: number }>
-
-  let fullText = ""
-  try {
-    const data = await pdfParse(buffer)
-    fullText = data.text
-  } catch (e) {
-    throw new Error(
-      "Could not extract text from PDF. Please ensure this is a digital (not scanned) Crystal Report PDF. Detail: " +
-        (e instanceof Error ? e.message : String(e))
-    )
-  }
-
-  if (!fullText.trim()) {
-    throw new Error(
-      "PDF appears to be empty or image-only (scanned). Text extraction requires a digital PDF."
-    )
-  }
-
-  // Split into lines, clean up
+async function parseCrystalReportPdf(fullText: string): Promise<ParseResult> {
   const lines = fullText
     .split(/\r?\n/)
     .map((l) => l.trimEnd())
-    .filter((l) => l.trim().length > 0)
 
-  return parseLinesAsCrystalReport(lines)
-}
-
-// ── Crystal Report text parser ───────────────────────────────────────────────
-//
-// The Crystal Report IN-OUT layout (as plain text from pdf-parse):
-//
-//   Union Developers
-//   Monthly IN-OUT Report
-//   For Date: 2024/03/21 to 2024/04/20
-//   Department: ...
-//   [day numbers row]  e.g.  21  22  23  24  ...
-//   [day names row]    e.g.  Thu Fri Sat Sun ...
-//   [employee rows — pairs of in/out lines]:
-//     200201 / Employee Name\nDesignation    08:30  09:00  ...
-//     [out times or blank]                    17:30  18:00  ...
-//
-// pdf-parse extracts text with spaces preserved, so column positions
-// are represented as multiple spaces between values.
-
-function parseLinesAsCrystalReport(lines: string[]): ParseResult {
   // ── 1. Find "For Date:" ────────────────────────────────────────────────
   let reportStartDate: Date | null = null
   let dateRangeLabel = ""
   let forDateLineIdx = -1
 
-  for (let i = 0; i < Math.min(lines.length, 20); i++) {
+  for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(/for\s+date[:\s]+(\d[\d/]+)\s+to\s+(\d[\d/]+)/i)
     if (m) {
       reportStartDate = new Date(m[1].replace(/\//g, "-"))
@@ -128,92 +103,75 @@ function parseLinesAsCrystalReport(lines: string[]): ParseResult {
     throw new Error("Crystal Report: could not parse the 'For Date:' range.")
   }
 
-  // ── 2. Find the day-number header row ─────────────────────────────────
-  // This is a line that contains ≥ 5 integers in range 1–31 separated by spaces
+  const startDay = reportStartDate.getDate()
+  const startMonth = reportStartDate.getMonth()
+  const startYear = reportStartDate.getFullYear()
+
+  // ── 2. Find day-number header row ──────────────────────────────────────
+  // A line that when split by whitespace gives ≥5 tokens all being 1-2 digit
+  // integers between 1 and 31. We search generously (up to 25 lines after "For Date:")
   let dayHeaderLineIdx = -1
-  for (let i = forDateLineIdx + 1; i < Math.min(lines.length, forDateLineIdx + 15); i++) {
-    const nums = extractDayNumbers(lines[i])
-    if (nums.length >= 5) {
+  for (let i = forDateLineIdx + 1; i < Math.min(lines.length, forDateLineIdx + 25); i++) {
+    if (isDayNumberRow(lines[i])) {
       dayHeaderLineIdx = i
       break
     }
   }
 
   if (dayHeaderLineIdx === -1) {
-    throw new Error("Crystal Report: could not find the day-number header row.")
-  }
-
-  // ── 3. Build day-column positional map ────────────────────────────────
-  // We parse the positions of each day number in the header line
-  const dayHeaderLine = lines[dayHeaderLineIdx]
-  const startDay = reportStartDate.getDate()
-  const startMonth = reportStartDate.getMonth()
-  const startYear = reportStartDate.getFullYear()
-
-  // Extract all [charOffset, dayNumber] pairs from the header line
-  const dayPositions: Array<{ pos: number; dayNum: number; dateStr: string }> = []
-  const dayNumRegex = /\b(\d{1,2})\b/g
-  let match: RegExpExecArray | null
-  while ((match = dayNumRegex.exec(dayHeaderLine)) !== null) {
-    const dayNum = parseInt(match[1], 10)
-    if (dayNum < 1 || dayNum > 31) continue
-    let year = startYear
-    let month = startMonth
-    if (dayNum < startDay) {
-      month++
-      if (month > 11) { month = 0; year++ }
+    // Try a fallback: look for a line where ALL tokens are 1-31
+    for (let i = forDateLineIdx + 1; i < Math.min(lines.length, forDateLineIdx + 30); i++) {
+      if (isDayNumberRowLoose(lines[i])) {
+        dayHeaderLineIdx = i
+        break
+      }
     }
-    const dateStr = year + "-" + String(month + 1).padStart(2, "0") + "-" + String(dayNum).padStart(2, "0")
-    dayPositions.push({ pos: match.index, dayNum, dateStr })
   }
+
+  if (dayHeaderLineIdx === -1) {
+    // Return debug info in the error
+    const snippet = lines.slice(forDateLineIdx, forDateLineIdx + 20).join("\n")
+    throw new Error(
+      "Crystal Report: could not find the day-number header row. " +
+        "Lines after For Date: " + JSON.stringify(snippet)
+    )
+  }
+
+  // ── 3. Build column position → date map ───────────────────────────────
+  const dayHeaderLine = lines[dayHeaderLineIdx]
+  const dayPositions = buildDayPositions(dayHeaderLine, startDay, startMonth, startYear)
 
   if (dayPositions.length === 0) {
     throw new Error("Crystal Report: no date columns found in header row.")
   }
 
-  // ── 4. Parse employee row pairs (starting after the day-of-week row) ──
-  const dataStartIdx = dayHeaderLineIdx + 2 // skip the day-of-week row
+  // ── 4. Parse employee pairs ────────────────────────────────────────────
+  const dataStartIdx = dayHeaderLineIdx + 2 // skip day-of-week row
 
   const rawRows: RawRow[] = []
   const seenHcmIds = new Set<string>()
 
+  // Track current day positions (rebuilt per department)
+  let currentDayPositions = dayPositions
+
   let i = dataStartIdx
   while (i < lines.length) {
     const line = lines[i]
+    if (!line) { i++; continue }
 
-    // Detect new day-header row (re-detect for multi-department PDFs)
-    const nums = extractDayNumbers(line)
-    if (nums.length >= 5 && i > dayHeaderLineIdx) {
-      // Rebuild day positions for this new department section
-      const newDayPositions: typeof dayPositions = []
-      const re2 = /\b(\d{1,2})\b/g
-      let m2: RegExpExecArray | null
-      while ((m2 = re2.exec(line)) !== null) {
-        const dn = parseInt(m2[1], 10)
-        if (dn < 1 || dn > 31) continue
-        let year2 = startYear
-        let month2 = startMonth
-        if (dn < startDay) {
-          month2++
-          if (month2 > 11) { month2 = 0; year2++ }
-        }
-        const ds = year2 + "-" + String(month2 + 1).padStart(2, "0") + "-" + String(dn).padStart(2, "0")
-        newDayPositions.push({ pos: m2.index, dayNum: dn, dateStr: ds })
-      }
-      if (newDayPositions.length >= 5) {
-        dayPositions.splice(0, dayPositions.length, ...newDayPositions)
-        i += 2 // skip this header row and the day-of-week row
-        continue
-      }
+    // Detect a new department day-number header
+    if (isDayNumberRow(line) || isDayNumberRowLoose(line)) {
+      currentDayPositions = buildDayPositions(line, startDay, startMonth, startYear)
+      i += 2 // skip this header + day-of-week row
+      continue
     }
 
-    // Try to extract HCM ID from the start of this line
     const hcmId = extractHcmId(line)
     if (hcmId) {
       seenHcmIds.add(hcmId)
-      const inTimes = extractTimesFromLine(line, dayPositions)
-      const nextLine = lines[i + 1] ?? ""
-      const outTimes = extractTimesFromLine(nextLine, dayPositions)
+      const inTimes = extractTimesFromLine(line, currentDayPositions)
+      const nextLine = i + 1 < lines.length ? lines[i + 1] : ""
+      const outTimes = extractTimesFromLine(nextLine, currentDayPositions)
 
       const allDates = new Set([...inTimes.keys(), ...outTimes.keys()])
       for (const dateStr of allDates) {
@@ -224,7 +182,7 @@ function parseLinesAsCrystalReport(lines: string[]): ParseResult {
           outTime: outTimes.get(dateStr) ?? null,
         })
       }
-      i += 2 // consume both in-row and out-row
+      i += 2
       continue
     }
 
@@ -238,49 +196,75 @@ function parseLinesAsCrystalReport(lines: string[]): ParseResult {
     )
   }
 
-  return {
-    format: "crystal-report",
-    rows: rawRows,
-    codes: [...seenHcmIds],
-    dateRangeLabel,
+  return { format: "crystal-report", rows: rawRows, codes: [...seenHcmIds], dateRangeLabel }
+}
+
+// ── Helper: check if a line is a day-number row ──────────────────────────────
+
+/** Strict: ≥5 whitespace-separated tokens, ALL 1–31 integers */
+function isDayNumberRow(line: string): boolean {
+  const trimmed = line.trim()
+  if (!trimmed) return false
+  const tokens = trimmed.split(/\s+/)
+  if (tokens.length < 5) return false
+  return tokens.every((t) => /^\d{1,2}$/.test(t) && parseInt(t, 10) >= 1 && parseInt(t, 10) <= 31)
+}
+
+/** Loose: ≥8 tokens that are 1–31 integers (allows other content) */
+function isDayNumberRowLoose(line: string): boolean {
+  const tokens = line.trim().split(/\s+/)
+  const dayNums = tokens.filter((t) => /^\d{1,2}$/.test(t) && parseInt(t, 10) >= 1 && parseInt(t, 10) <= 31)
+  return dayNums.length >= 8
+}
+
+// ── Helper: build day positions from a header line ───────────────────────────
+
+function buildDayPositions(
+  line: string,
+  startDay: number,
+  startMonth: number,
+  startYear: number
+): Array<{ pos: number; dateStr: string }> {
+  const positions: Array<{ pos: number; dateStr: string }> = []
+  const re = /\b(\d{1,2})\b/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(line)) !== null) {
+    const dayNum = parseInt(m[1], 10)
+    if (dayNum < 1 || dayNum > 31) continue
+    let year = startYear
+    let month = startMonth
+    if (dayNum < startDay) {
+      month++
+      if (month > 11) { month = 0; year++ }
+    }
+    const dateStr =
+      year + "-" + String(month + 1).padStart(2, "0") + "-" + String(dayNum).padStart(2, "0")
+    positions.push({ pos: m.index, dateStr })
   }
+  return positions
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helper: extract HCM ID ────────────────────────────────────────────────────
 
-function extractDayNumbers(line: string): number[] {
-  const matches = line.match(/\b\d{1,2}\b/g) ?? []
-  return matches
-    .map(Number)
-    .filter((n) => n >= 1 && n <= 31)
-}
-
-/**
- * Extract HCM ID (4–10 digit number) from the start of the line.
- * Crystal Report format: "200201 / Employee Name" or just "200201"
- */
 function extractHcmId(line: string): string | null {
   const trimmed = line.trimStart()
-  const m = trimmed.match(/^(\d{4,10})(?:\s*\/|\s+[A-Z])/)
+  // Match: 5-6 digit number followed by " / " or whitespace+letter (start of name)
+  const m = trimmed.match(/^(\d{4,10})(?:\s*\/|\s+[A-Za-z])/)
   return m ? m[1] : null
 }
 
-/**
- * Extract HH:MM time strings from a line, mapped to the nearest day column
- * by character position. Uses a generous X_TOLERANCE to handle spacing drift.
- */
+// ── Helper: extract times from a line ────────────────────────────────────────
+
 function extractTimesFromLine(
   line: string,
-  dayPositions: Array<{ pos: number; dayNum: number; dateStr: string }>
+  dayPositions: Array<{ pos: number; dateStr: string }>
 ): Map<string, string> {
-  const X_TOLERANCE = 6 // characters
+  const X_TOLERANCE = 8
   const result = new Map<string, string>()
-  const timeRegex = /\b(\d{1,2}:\d{2})\b/g
+  const re = /\b(\d{1,2}:\d{2})\b/g
   let m: RegExpExecArray | null
-  while ((m = timeRegex.exec(line)) !== null) {
-    const timeStr = m[1]
+  while ((m = re.exec(line)) !== null) {
     const charPos = m.index
-    // Find the nearest day column
     let nearest: (typeof dayPositions)[0] | null = null
     let minDist = Infinity
     for (const col of dayPositions) {
@@ -291,7 +275,7 @@ function extractTimesFromLine(
       }
     }
     if (nearest && !result.has(nearest.dateStr)) {
-      result.set(nearest.dateStr, timeStr)
+      result.set(nearest.dateStr, m[1])
     }
   }
   return result
