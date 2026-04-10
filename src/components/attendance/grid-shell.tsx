@@ -1,3 +1,4 @@
+// v2 — bulk-mark enabled
 "use client"
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react"
