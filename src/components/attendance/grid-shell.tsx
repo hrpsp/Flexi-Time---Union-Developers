@@ -1,4 +1,4 @@
-// v2 — bulk-mark enabled
+// v3 — time override + employee profile tabs
 "use client"
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react"
@@ -351,6 +351,9 @@ export function GridShell({
       note:             string | null
       isOverridden:     boolean
       effectiveStatus:  string
+      inTime:           string | null
+      outTime:          string | null
+      workedMinutes:    number | null
     }
   ) {
     setEmployees((prev) =>
