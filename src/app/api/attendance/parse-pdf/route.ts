@@ -46,61 +46,25 @@ export async function POST(req: Request) {
       options?: Record<string, unknown>
     ) => Promise<{ text: string; numpages: number }>
 
-    // Use a custom render to get better layout preservation
-    const pages: string[] = []
-    const data = await pdfParse(buffer, {
-      // Custom page render that captures each page's text separately
-      pagerender: (pageData: any) => { // eslint-disable-line
-        return pageData.getTextContent().then((content: any) => { // eslint-disable-line
-          // Sort text items by Y position (top to bottom), then X (left to right)
-          const items = (content.items as any[]) // eslint-disable-line
-            .filter((item: any) => item.str?.trim()) // eslint-disable-line
-            .sort((a: any, b: any) => { // eslint-disable-line
-              const yDiff = Math.round(b.transform[5]) - Math.round(a.transform[5])
-              if (yDiff !== 0) return yDiff
-              return a.transform[4] - b.transform[4]
-            })
-
-          // Group into rows by Y coordinate (within 3pt tolerance)
-          const rows: string[][] = []
-          let curRow: string[] = []
-          let lastY = -9999
-
-          for (const item of items) {
-            const y = Math.round(item.transform[5])
-            if (Math.abs(y - lastY) > 3 && curRow.length > 0) {
-              rows.push(curRow)
-              curRow = []
-            }
-            curRow.push(item.str)
-            lastY = y
-          }
-          if (curRow.length > 0) rows.push(curRow)
-
-          // Join each row's items with a tab, rows with newline
-          const pageText = rows.map(r => r.join("\t")).join("\n")
-          pages.push(pageText)
-          return pageText
-        })
-      }
-    })
-
-    const fullText = pages.length > 0 ? pages.join("\n") : data.text
+    const data = await pdfParse(buffer)
+    const fullText = data.text
 
     if (!fullText.trim()) {
-      throw new Error("PDF appears to be empty or image-only (scanned). Text extraction requires a digital PDF.")
+      throw new Error("PDF appears to be empty or image-only (scanned).")
     }
+
+    const lines = fullText.split(/\r?\n/).map(l => l.trimEnd())
 
     if (debug) {
       return json({
         debug: true,
         numpages: data.numpages,
-        text: fullText.slice(0, 10000),
-        lines: fullText.split("\n").slice(0, 60)
+        lines: lines.slice(0, 80),
+        text: fullText.slice(0, 8000),
       })
     }
 
-    const result = parseCrystalReport(fullText)
+    const result = parseCrystalReport(lines)
     return json(result)
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to parse PDF."
@@ -109,10 +73,12 @@ export async function POST(req: Request) {
 }
 
 // ── Crystal Report Parser ─────────────────────────────────────────────────────
+//
+// Strategy: Find the date range and day-number header.
+// Then map employee time values by character position to day columns.
+// Falls back to sequence-based mapping if column positions aren't reliable.
 
-function parseCrystalReport(fullText: string): ParseResult {
-  const lines = fullText.split("\n").map(l => l.trimEnd())
-
+function parseCrystalReport(lines: string[]): ParseResult {
   // ── 1. Find "For Date:" ────────────────────────────────────────────────
   let reportStart: Date | null = null
   let reportEnd: Date | null = null
@@ -120,8 +86,9 @@ function parseCrystalReport(fullText: string): ParseResult {
   let forDateIdx = -1
 
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/for\s*date[:\s]+(\d[\d/]+)\s+to\s+(\d[\d/]+)/i)
-      || lines[i].match(/for\s*date[:\s]+(\d[\d-]+)\s+to\s+(\d[\d-]+)/i)
+    // Join multi-word "For Date:" that might be split by whitespace
+    const normalized = lines[i].replace(/\s+/g, " ")
+    const m = normalized.match(/for date[: ]+([\d/]+) to ([\d/]+)/i)
     if (m) {
       reportStart = new Date(m[1].replace(/\//g, "-"))
       reportEnd = new Date(m[2].replace(/\//g, "-"))
@@ -132,105 +99,160 @@ function parseCrystalReport(fullText: string): ParseResult {
   }
 
   if (!reportStart || isNaN(reportStart.getTime())) {
-    // Also try tab-separated
-    for (let i = 0; i < lines.length; i++) {
-      const joined = lines[i].replace(/\t/g, " ")
-      const m = joined.match(/for\s*date[:\s]+(\d[\d/]+)\s+to\s+(\d[\d/]+)/i)
-      if (m) {
-        reportStart = new Date(m[1].replace(/\//g, "-"))
-        reportEnd = new Date(m[2].replace(/\//g, "-"))
-        dateRangeLabel = m[1] + " to " + m[2]
-        forDateIdx = i
-        break
-      }
-    }
-  }
-
-  if (!reportStart || isNaN(reportStart.getTime())) {
-    throw new Error("Crystal Report: could not parse the 'For Date:' range. Preview: " + lines.slice(0, 10).join(" | "))
+    const preview = lines.slice(0, 15).join(" | ").slice(0, 400)
+    throw new Error("Crystal Report: could not parse 'For Date:'. Lines: " + preview)
   }
 
   const startDay = reportStart.getDate()
   const startMonth = reportStart.getMonth()
   const startYear = reportStart.getFullYear()
+  const endDay = reportEnd!.getDate()
+  const endMonth = reportEnd!.getMonth()
+  const endYear = reportEnd!.getFullYear()
+
+  // Build the ordered list of all dates in the report period
+  const allDates: string[] = []
+  const cur = new Date(reportStart)
+  const end = new Date(reportEnd!)
+  end.setDate(end.getDate() + 1) // inclusive
+  while (cur < end) {
+    allDates.push(
+      cur.getFullYear() + "-" +
+      String(cur.getMonth() + 1).padStart(2, "0") + "-" +
+      String(cur.getDate()).padStart(2, "0")
+    )
+    cur.setDate(cur.getDate() + 1)
+  }
 
   // ── 2. Find day-number header row ──────────────────────────────────────
-  // Look for a line (tab-delimited or space-delimited) where tokens are mostly 1-31 integers
   let dayHeaderIdx = -1
   let dayPositions: Array<{ pos: number; dateStr: string }> = []
 
   for (let i = forDateIdx + 1; i < Math.min(lines.length, forDateIdx + 40); i++) {
-    const result = tryParseDayHeader(lines[i], startDay, startMonth, startYear)
-    if (result && result.length >= 5) {
+    const pos = tryBuildDayPositions(lines[i], startDay, startMonth, startYear)
+    if (pos && pos.length >= 5) {
       dayHeaderIdx = i
-      dayPositions = result
+      dayPositions = pos
       break
     }
   }
 
-  if (dayHeaderIdx === -1) {
-    const sample = lines.slice(forDateIdx, forDateIdx + 25).join("\n")
-    throw new Error(
-      "Crystal Report: could not find the day-number header row. " +
-        "Sample after For Date: " + JSON.stringify(sample.slice(0, 500))
-    )
-  }
-
   // ── 3. Parse employee pairs ────────────────────────────────────────────
-  // Skip the day-of-week abbreviation row (next line after day numbers)
-  const dataStart = dayHeaderIdx + 2
+  // If day header not found, skip to finding employees directly (sequence mode)
+  const dataStart = dayHeaderIdx >= 0 ? dayHeaderIdx + 2 : forDateIdx + 3
   const rawRows: RawRow[] = []
   const seenHcmIds = new Set<string>()
   let curDayPositions = dayPositions
+  let sequenceMode = dayHeaderIdx < 0 // use sequence mapping if no day header found
 
   let i = dataStart
   while (i < lines.length) {
     const line = lines[i]
     if (!line?.trim()) { i++; continue }
 
-    // Check if this is a new day-number header row (multi-department)
-    const newDayPos = tryParseDayHeader(line, startDay, startMonth, startYear)
-    if (newDayPos && newDayPos.length >= 5 && i > dayHeaderIdx) {
-      curDayPositions = newDayPos
-      i += 2 // skip this header + day-of-week row
-      continue
-    }
-
-    const hcmId = extractHcmId(line)
-    if (hcmId) {
-      seenHcmIds.add(hcmId)
-      const inTimes = extractTimes(line, curDayPositions)
-      const outLine = i + 1 < lines.length ? lines[i + 1] : ""
-      const outTimes = extractTimes(outLine, curDayPositions)
-
-      const allDates = new Set([...inTimes.keys(), ...outTimes.keys()])
-      for (const dateStr of allDates) {
-        rawRows.push({
-          code: hcmId,
-          date: dateStr,
-          inTime: inTimes.get(dateStr) ?? null,
-          outTime: outTimes.get(dateStr) ?? null,
-        })
-      }
+    // Detect new day-header (multi-dept)
+    const newPos = tryBuildDayPositions(line, startDay, startMonth, startYear)
+    if (newPos && newPos.length >= 5 && i > (dayHeaderIdx >= 0 ? dayHeaderIdx : 0)) {
+      curDayPositions = newPos
+      sequenceMode = false
       i += 2
       continue
     }
 
-    i++
+    const hcmId = extractHcmId(line)
+    if (!hcmId) { i++; continue }
+
+    seenHcmIds.add(hcmId)
+    const nextLine = i + 1 < lines.length ? lines[i + 1] : ""
+
+    let pairs: Array<{ dateStr: string; inTime: string | null; outTime: string | null }>
+
+    if (!sequenceMode && curDayPositions.length > 0) {
+      // Position-based: map times by character offset to day columns
+      pairs = buildPairsFromPositions(line, nextLine, curDayPositions)
+    } else {
+      // Sequence-based: times appear left-to-right in date order
+      // Use allDates to assign: skip weekends? No — just use ALL dates in order.
+      pairs = buildPairsFromSequence(line, nextLine, allDates)
+    }
+
+    for (const p of pairs) {
+      if (p.inTime !== null || p.outTime !== null) {
+        rawRows.push({ code: hcmId, date: p.dateStr, inTime: p.inTime, outTime: p.outTime })
+      }
+    }
+
+    i += 2
   }
 
   if (rawRows.length === 0) {
     throw new Error(
-      "No attendance records found. Please confirm this is a Union Developers Monthly IN-OUT Report."
+      "No attendance records found. " +
+        (dayHeaderIdx < 0 ? "Day-number header not found (sequence mode used). " : "") +
+        "Please confirm this is a Union Developers Monthly IN-OUT Report."
     )
   }
 
   return { format: "crystal-report", rows: rawRows, codes: [...seenHcmIds], dateRangeLabel }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Position-based pair builder ───────────────────────────────────────────────
 
-function tryParseDayHeader(
+function buildPairsFromPositions(
+  inLine: string,
+  outLine: string,
+  dayPositions: Array<{ pos: number; dateStr: string }>
+) {
+  const inMap = extractTimesMap(inLine, dayPositions)
+  const outMap = extractTimesMap(outLine, dayPositions)
+  const all = new Set([...inMap.keys(), ...outMap.keys()])
+  return [...all].map(d => ({ dateStr: d, inTime: inMap.get(d) ?? null, outTime: outMap.get(d) ?? null }))
+}
+
+function extractTimesMap(
+  line: string,
+  dayPositions: Array<{ pos: number; dateStr: string }>
+): Map<string, string> {
+  const TOL = 10
+  const result = new Map<string, string>()
+  const re = /\b(\d{1,2}:\d{2})\b/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(line)) !== null) {
+    let nearest: (typeof dayPositions)[0] | null = null
+    let minDist = Infinity
+    for (const col of dayPositions) {
+      const d = Math.abs(m.index - col.pos)
+      if (d < minDist && d <= TOL) { minDist = d; nearest = col }
+    }
+    if (nearest && !result.has(nearest.dateStr)) result.set(nearest.dateStr, m[1])
+  }
+  return result
+}
+
+// ── Sequence-based pair builder ───────────────────────────────────────────────
+
+function buildPairsFromSequence(inLine: string, outLine: string, allDates: string[]) {
+  const inTimes = extractTimesSequence(inLine)
+  const outTimes = extractTimesSequence(outLine)
+  const count = Math.max(inTimes.length, outTimes.length)
+  const pairs = []
+  for (let j = 0; j < count && j < allDates.length; j++) {
+    pairs.push({
+      dateStr: allDates[j],
+      inTime: inTimes[j] ?? null,
+      outTime: outTimes[j] ?? null,
+    })
+  }
+  return pairs
+}
+
+function extractTimesSequence(line: string): string[] {
+  return (line.match(/\b\d{1,2}:\d{2}\b/g) ?? [])
+}
+
+// ── Day-header detection ──────────────────────────────────────────────────────
+
+function tryBuildDayPositions(
   line: string,
   startDay: number,
   startMonth: number,
@@ -238,82 +260,31 @@ function tryParseDayHeader(
 ): Array<{ pos: number; dateStr: string }> | null {
   if (!line?.trim()) return null
 
-  // Try both tab and space delimiters
   const positions: Array<{ pos: number; dateStr: string }> = []
 
-  // Try tab-delimited first (from our custom render)
-  const tabTokens = line.split("\t")
-  if (tabTokens.length >= 5) {
-    let allDayNums = true
-    for (const t of tabTokens) {
-      const n = parseInt(t.trim(), 10)
-      if (isNaN(n) || n < 1 || n > 31 || !/^\d{1,2}$/.test(t.trim())) {
-        allDayNums = false
-        break
-      }
-    }
-    if (allDayNums) {
-      let pos = 0
-      for (const t of tabTokens) {
-        const dayNum = parseInt(t.trim(), 10)
-        const dateStr = calcDateStr(dayNum, startDay, startMonth, startYear)
-        positions.push({ pos, dateStr })
-        pos += t.length + 1 // +1 for tab
-      }
-      return positions
-    }
-  }
-
-  // Try space-delimited: find all standalone 1-2 digit numbers
-  const re = /(?:^|\s)(\d{1,2})(?=\s|$)/g
+  // Match all standalone 1-2 digit integers in the line
+  const re = /(?<![\d:])\b(\d{1,2})\b(?![:\d])/g
   let m: RegExpExecArray | null
   while ((m = re.exec(line)) !== null) {
-    const dayNum = parseInt(m[1], 10)
-    if (dayNum < 1 || dayNum > 31) continue
-    const dateStr = calcDateStr(dayNum, startDay, startMonth, startYear)
-    positions.push({ pos: m.index + (m[0].length - m[1].length), dateStr })
+    const n = parseInt(m[1], 10)
+    if (n < 1 || n > 31) continue
+    let year = startYear, month = startMonth
+    if (n < startDay) {
+      month++
+      if (month > 11) { month = 0; year++ }
+    }
+    const dateStr = year + "-" + String(month + 1).padStart(2, "0") + "-" + String(n).padStart(2, "0")
+    positions.push({ pos: m.index, dateStr })
   }
 
-  // Must have at least 5 day numbers that are plausible day-of-month values
-  if (positions.length >= 5) return positions
+  // Must find ≥5 day numbers AND the line must NOT contain HH:MM times
+  if (positions.length >= 5 && !/ \d{1,2}:\d{2}/.test(line)) return positions
   return null
 }
 
-function calcDateStr(dayNum: number, startDay: number, startMonth: number, startYear: number): string {
-  let year = startYear
-  let month = startMonth
-  if (dayNum < startDay) {
-    month++
-    if (month > 11) { month = 0; year++ }
-  }
-  return year + "-" + String(month + 1).padStart(2, "0") + "-" + String(dayNum).padStart(2, "0")
-}
+// ── HCM ID extraction ─────────────────────────────────────────────────────────
 
 function extractHcmId(line: string): string | null {
-  // HCM ID: 4-10 digits at start of line, followed by slash, tab, or whitespace+letter
-  const m = line.trimStart().match(/^(\d{4,10})(?:\s*\/|\t|\s+[A-Za-z])/)
+  const m = line.trimStart().match(/^(\d{4,10})(?:\s*\/|\s+[A-Za-z])/)
   return m ? m[1] : null
-}
-
-function extractTimes(
-  line: string,
-  dayPositions: Array<{ pos: number; dateStr: string }>
-): Map<string, string> {
-  const X_TOL = 10 // character tolerance for position matching
-  const result = new Map<string, string>()
-  const re = /\b(\d{1,2}:\d{2})\b/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(line)) !== null) {
-    const charPos = m.index
-    let nearest: (typeof dayPositions)[0] | null = null
-    let minDist = Infinity
-    for (const col of dayPositions) {
-      const dist = Math.abs(charPos - col.pos)
-      if (dist < minDist && dist <= X_TOL) { minDist = dist; nearest = col }
-    }
-    if (nearest && !result.has(nearest.dateStr)) {
-      result.set(nearest.dateStr, m[1])
-    }
-  }
-  return result
 }
