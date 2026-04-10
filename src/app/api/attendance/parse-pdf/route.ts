@@ -53,14 +53,14 @@ export async function POST(req: Request) {
       throw new Error("PDF appears to be empty or image-only (scanned).")
     }
 
-    const lines = fullText.split(/\r?\n/).map(l => l.trimEnd())
+    const lines = fullText.split(/\r?\n/).map((l: string) => l.trimEnd())
 
     if (debug) {
       return json({
         debug: true,
         numpages: data.numpages,
-        lines: lines.slice(0, 80),
-        text: fullText.slice(0, 8000),
+        lines: lines.slice(0, 120),
+        text: fullText.slice(0, 10000),
       })
     }
 
@@ -74,21 +74,40 @@ export async function POST(req: Request) {
 
 // ── Crystal Report Parser ─────────────────────────────────────────────────────
 //
-// Strategy: Find the date range and day-number header.
-// Then map employee time values by character position to day columns.
-// Falls back to sequence-based mapping if column positions aren't reliable.
+// PDF structure (one line per item):
+//   "Monthly IN-OUT Report"
+//   "Union Developers"
+//   "For Date: 2026/03/21 to 2026/04/08"
+//   "Division:"
+//   "21 "          <- day number (may have trailing space, or "27 Fri28 " combined)
+//   "Sat"          <- day name (skip)
+//   "22 "
+//   "Sun"
+//   ... (18 dates × 2 lines = 36 lines of day headers)
+//   " 200201 / Hamza Khan   /"    <- employee line (HCM ID at start)
+//   "Assistant Manager Finance"  <- designation line (skip)
+//   " "            <- blank/space = no punch
+//   " "
+//   "10:10"        <- in-time for day N
+//   " "            <- out-time for day N (absent/missing)
+//   "10:05"        <- in-time for day N+1
+//   ...  (alternating IN / OUT, 2 lines per date)
+//   [next employee line or page footer / new day header block]
+//
+// Key insight: after the employee + designation lines, the next block contains
+// exactly (numDates * 2) lines of punch data (in strict IN/OUT alternation).
+// A " " (space-only) line means no punch for that slot.
+// Page footers and repeated day-header blocks are detected and skipped.
 
 function parseCrystalReport(lines: string[]): ParseResult {
-  // ── 1. Find "For Date:" ────────────────────────────────────────────────
+  // ── 1. Find "For Date:" ─────────────────────────────────────────────────
   let reportStart: Date | null = null
   let reportEnd: Date | null = null
   let dateRangeLabel = ""
   let forDateIdx = -1
 
   for (let i = 0; i < lines.length; i++) {
-    // Join multi-word "For Date:" that might be split by whitespace
-    const normalized = lines[i].replace(/\s+/g, " ")
-    const m = normalized.match(/for date[: ]+([\d/]+) to ([\d/]+)/i)
+    const m = lines[i].replace(/\s+/g, " ").match(/for date[: ]+(\d[\d/]+) to (\d[\d/]+)/i)
     if (m) {
       reportStart = new Date(m[1].replace(/\//g, "-"))
       reportEnd = new Date(m[2].replace(/\//g, "-"))
@@ -99,192 +118,116 @@ function parseCrystalReport(lines: string[]): ParseResult {
   }
 
   if (!reportStart || isNaN(reportStart.getTime())) {
-    const preview = lines.slice(0, 15).join(" | ").slice(0, 400)
-    throw new Error("Crystal Report: could not parse 'For Date:'. Lines: " + preview)
+    throw new Error("Crystal Report: could not find 'For Date:' header.")
   }
 
-  const startDay = reportStart.getDate()
-  const startMonth = reportStart.getMonth()
-  const startYear = reportStart.getFullYear()
-  const endDay = reportEnd!.getDate()
-  const endMonth = reportEnd!.getMonth()
-  const endYear = reportEnd!.getFullYear()
-
-  // Build the ordered list of all dates in the report period
+  // ── 2. Build ordered date list ─────────────────────────────────────────
   const allDates: string[] = []
   const cur = new Date(reportStart)
-  const end = new Date(reportEnd!)
-  end.setDate(end.getDate() + 1) // inclusive
-  while (cur < end) {
+  const endDate = new Date(reportEnd!)
+  endDate.setDate(endDate.getDate() + 1) // make end exclusive
+  while (cur < endDate) {
     allDates.push(
-      cur.getFullYear() + "-" +
-      String(cur.getMonth() + 1).padStart(2, "0") + "-" +
-      String(cur.getDate()).padStart(2, "0")
+      cur.getFullYear() +
+        "-" +
+        String(cur.getMonth() + 1).padStart(2, "0") +
+        "-" +
+        String(cur.getDate()).padStart(2, "0")
     )
     cur.setDate(cur.getDate() + 1)
   }
+  const numDates = allDates.length // e.g. 19
 
-  // ── 2. Find day-number header row ──────────────────────────────────────
-  let dayHeaderIdx = -1
-  let dayPositions: Array<{ pos: number; dateStr: string }> = []
-
-  for (let i = forDateIdx + 1; i < Math.min(lines.length, forDateIdx + 40); i++) {
-    const pos = tryBuildDayPositions(lines[i], startDay, startMonth, startYear)
-    if (pos && pos.length >= 5) {
-      dayHeaderIdx = i
-      dayPositions = pos
-      break
-    }
-  }
-
-  // ── 3. Parse employee pairs ────────────────────────────────────────────
-  // If day header not found, skip to finding employees directly (sequence mode)
-  const dataStart = dayHeaderIdx >= 0 ? dayHeaderIdx + 2 : forDateIdx + 3
+  // ── 3. Parse employee blocks ────────────────────────────────────────────
   const rawRows: RawRow[] = []
-  const seenHcmIds = new Set<string>()
-  let curDayPositions = dayPositions
-  let sequenceMode = dayHeaderIdx < 0 // use sequence mapping if no day header found
+  const seenCodes = new Set<string>()
 
-  let i = dataStart
+  // An employee line starts with optional spaces then digits/HCM ID
+  // Pattern: " 200201 / Hamza Khan   /" or " 200201 / Name / "
+  const EMP_RE = /^\s*(\d{4,10})\s*\/\s*.+/
+
+  let i = forDateIdx + 1
+
   while (i < lines.length) {
     const line = lines[i]
-    if (!line?.trim()) { i++; continue }
 
-    // Detect new day-header (multi-dept)
-    const newPos = tryBuildDayPositions(line, startDay, startMonth, startYear)
-    if (newPos && newPos.length >= 5 && i > (dayHeaderIdx >= 0 ? dayHeaderIdx : 0)) {
-      curDayPositions = newPos
-      sequenceMode = false
-      i += 2
+    // Check if this is an employee line
+    const empMatch = line.match(EMP_RE)
+    if (!empMatch) {
+      i++
       continue
     }
 
-    const hcmId = extractHcmId(line)
-    if (!hcmId) { i++; continue }
+    const hcmId = empMatch[1]
+    seenCodes.add(hcmId)
 
-    seenHcmIds.add(hcmId)
-    const nextLine = i + 1 < lines.length ? lines[i + 1] : ""
+    // Skip the designation line (line i+1)
+    // Then read numDates * 2 punch lines starting at i+2
+    const punchStart = i + 2
+    const punches: string[] = []
 
-    let pairs: Array<{ dateStr: string; inTime: string | null; outTime: string | null }>
+    let j = punchStart
+    let collected = 0
+    while (j < lines.length && collected < numDates * 2) {
+      const pl = lines[j]
 
-    if (!sequenceMode && curDayPositions.length > 0) {
-      // Position-based: map times by character offset to day columns
-      pairs = buildPairsFromPositions(line, nextLine, curDayPositions)
-    } else {
-      // Sequence-based: times appear left-to-right in date order
-      // Use allDates to assign: skip weekends? No — just use ALL dates in order.
-      pairs = buildPairsFromSequence(line, nextLine, allDates)
+      // Stop if we hit a new employee line
+      if (EMP_RE.test(pl)) break
+
+      // Skip page footer lines (contain "Page X of Y" or "Print Date" or "Department:")
+      if (
+        /page\s+\d+\s+of\s+\d+/i.test(pl) ||
+        /print date/i.test(pl) ||
+        /^department:/i.test(pl) ||
+        /^\d{2}\/\d{2}\/\d{4}/.test(pl.trim())
+      ) {
+        j++
+        continue
+      }
+
+      // Skip day-header repetitions (lines that are just day numbers or day names)
+      // Day number lines: optional spaces + 1-2 digits optionally followed by " FriXX " etc
+      if (/^\s*(?:\d{1,2}\s+(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*\d{0,2}\s*|\d{1,2}\s*)$/.test(pl)) {
+        j++
+        continue
+      }
+      // Day name lines: just the day abbreviation
+      if (/^\s*(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s*$/.test(pl)) {
+        j++
+        continue
+      }
+
+      // This is a punch line: either a time "HH:MM" or a blank/space
+      punches.push(pl.trim())
+      collected++
+      j++
     }
 
-    for (const p of pairs) {
-      if (p.inTime !== null || p.outTime !== null) {
-        rawRows.push({ code: hcmId, date: p.dateStr, inTime: p.inTime, outTime: p.outTime })
+    // Map punches to dates: even indices (0,2,4...) = IN, odd (1,3,5...) = OUT
+    for (let d = 0; d < numDates && d * 2 < punches.length; d++) {
+      const inRaw = punches[d * 2] ?? ""
+      const outRaw = punches[d * 2 + 1] ?? ""
+      const inTime = /^\d{1,2}:\d{2}$/.test(inRaw) ? inRaw : null
+      const outTime = /^\d{1,2}:\d{2}$/.test(outRaw) ? outRaw : null
+      if (inTime !== null || outTime !== null) {
+        rawRows.push({ code: hcmId, date: allDates[d], inTime, outTime })
       }
     }
 
-    i += 2
+    // Advance past this employee's block
+    i = j
   }
 
   if (rawRows.length === 0) {
     throw new Error(
-      "No attendance records found. " +
-        (dayHeaderIdx < 0 ? "Day-number header not found (sequence mode used). " : "") +
-        "Please confirm this is a Union Developers Monthly IN-OUT Report."
+      "No attendance records found. Please confirm this is a Union Developers Monthly IN-OUT Report."
     )
   }
 
-  return { format: "crystal-report", rows: rawRows, codes: [...seenHcmIds], dateRangeLabel }
-}
-
-// ── Position-based pair builder ───────────────────────────────────────────────
-
-function buildPairsFromPositions(
-  inLine: string,
-  outLine: string,
-  dayPositions: Array<{ pos: number; dateStr: string }>
-) {
-  const inMap = extractTimesMap(inLine, dayPositions)
-  const outMap = extractTimesMap(outLine, dayPositions)
-  const all = new Set([...inMap.keys(), ...outMap.keys()])
-  return [...all].map(d => ({ dateStr: d, inTime: inMap.get(d) ?? null, outTime: outMap.get(d) ?? null }))
-}
-
-function extractTimesMap(
-  line: string,
-  dayPositions: Array<{ pos: number; dateStr: string }>
-): Map<string, string> {
-  const TOL = 10
-  const result = new Map<string, string>()
-  const re = /\b(\d{1,2}:\d{2})\b/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(line)) !== null) {
-    let nearest: (typeof dayPositions)[0] | null = null
-    let minDist = Infinity
-    for (const col of dayPositions) {
-      const d = Math.abs(m.index - col.pos)
-      if (d < minDist && d <= TOL) { minDist = d; nearest = col }
-    }
-    if (nearest && !result.has(nearest.dateStr)) result.set(nearest.dateStr, m[1])
+  return {
+    format: "crystal-report",
+    rows: rawRows,
+    codes: [...seenCodes],
+    dateRangeLabel,
   }
-  return result
-}
-
-// ── Sequence-based pair builder ───────────────────────────────────────────────
-
-function buildPairsFromSequence(inLine: string, outLine: string, allDates: string[]) {
-  const inTimes = extractTimesSequence(inLine)
-  const outTimes = extractTimesSequence(outLine)
-  const count = Math.max(inTimes.length, outTimes.length)
-  const pairs = []
-  for (let j = 0; j < count && j < allDates.length; j++) {
-    pairs.push({
-      dateStr: allDates[j],
-      inTime: inTimes[j] ?? null,
-      outTime: outTimes[j] ?? null,
-    })
-  }
-  return pairs
-}
-
-function extractTimesSequence(line: string): string[] {
-  return (line.match(/\b\d{1,2}:\d{2}\b/g) ?? [])
-}
-
-// ── Day-header detection ──────────────────────────────────────────────────────
-
-function tryBuildDayPositions(
-  line: string,
-  startDay: number,
-  startMonth: number,
-  startYear: number
-): Array<{ pos: number; dateStr: string }> | null {
-  if (!line?.trim()) return null
-
-  const positions: Array<{ pos: number; dateStr: string }> = []
-
-  // Match all standalone 1-2 digit integers in the line
-  const re = /(?<![\d:])\b(\d{1,2})\b(?![:\d])/g
-  let m: RegExpExecArray | null
-  while ((m = re.exec(line)) !== null) {
-    const n = parseInt(m[1], 10)
-    if (n < 1 || n > 31) continue
-    let year = startYear, month = startMonth
-    if (n < startDay) {
-      month++
-      if (month > 11) { month = 0; year++ }
-    }
-    const dateStr = year + "-" + String(month + 1).padStart(2, "0") + "-" + String(n).padStart(2, "0")
-    positions.push({ pos: m.index, dateStr })
-  }
-
-  // Must find ≥5 day numbers AND the line must NOT contain HH:MM times
-  if (positions.length >= 5 && !/ \d{1,2}:\d{2}/.test(line)) return positions
-  return null
-}
-
-// ── HCM ID extraction ─────────────────────────────────────────────────────────
-
-function extractHcmId(line: string): string | null {
-  const m = line.trimStart().match(/^(\d{4,10})(?:\s*\/|\s+[A-Za-z])/)
-  return m ? m[1] : null
 }
