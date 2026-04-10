@@ -332,11 +332,25 @@ export function GridShell({
     URL.revokeObjectURL(url)
   }
 
-  // ── Override cell click ───────────────────────────────────────────────────
-  function handleCellClick(emp: EmployeeRow, rec: RecordRow) {
+  // ── Override cell click (existing record OR empty/Sunday cell) ────────────
+  function handleCellClick(emp: EmployeeRow, rec: RecordRow | null, dateStr: string, isOffDay: boolean) {
     if (!canOverride) return
+    // Synthesise a placeholder record for cells with no DB row yet
+    const target: RecordRow = rec ?? {
+      id: "",                         // empty = new record, create on save
+      date: dateStr,
+      inTime: null,
+      outTime: null,
+      workedMinutes: null,
+      calculatedStatus: isOffDay ? "OFF" : "UNMARKED",
+      overriddenStatus: null,
+      leaveType: null,
+      note: null,
+      effectiveStatus: isOffDay ? "OFF" : "UNMARKED",
+      isOverridden: false,
+    }
     setOverrideTarget({
-      record:   { ...rec },
+      record:   { ...target },
       employee: { id: emp.id, name: emp.name, hcmId: emp.hcmId, designation: emp.designation },
     })
     setOverrideOpen(true)
@@ -356,13 +370,20 @@ export function GridShell({
       workedMinutes:    number | null
     }
   ) {
+    // If recordId is empty it means a brand-new record was just created
+    // — refresh the whole grid so the new row appears with a real ID
+    if (!recordId) {
+      fetchRecords(selectedDeptId, search)
+      return
+    }
+
     setEmployees((prev) =>
       prev.map((emp) => {
         const recIdx = emp.records.findIndex((r) => r.id === recordId)
         if (recIdx === -1) return emp
 
-        const oldRec = emp.records[recIdx]
-        const newRec = { ...oldRec, ...updated }
+        const oldRec  = emp.records[recIdx]
+        const newRec  = { ...oldRec, ...updated }
         const newRecords = [...emp.records]
         newRecords[recIdx] = newRec
 
@@ -944,7 +965,7 @@ interface AttendanceGridProps {
   onToggleAll:        () => void
   allSelected:        boolean
   someSelected:       boolean
-  onCellClick:        (emp: EmployeeRow, rec: RecordRow) => void
+  onCellClick:        (emp: EmployeeRow, rec: RecordRow | null, dateStr: string, isOffDay: boolean) => void
   onAutofillDept:     (dept: { id: string; name: string }) => void
   showDeptSeparators: boolean
 }
@@ -1139,15 +1160,38 @@ function AttendanceGrid({
 
                   {/* Day cells */}
                   {days.map((day) => {
-                    // Sunday → always OFF cell, not clickable
+                    // Sunday (OFF day) — clickable to allow override
                     if (day.isSunday) {
+                      const sundayRec = emp.recordMap.get(day.dateStr) ?? null
                       return (
                         <td
                           key={day.dateStr}
-                          className="border-r border-border text-center py-2 bg-slate-900/5"
+                          className={cn(
+                            "border-r border-border text-center py-2 bg-slate-900/5 group relative",
+                            canOverride && "cursor-pointer hover:bg-slate-200/40"
+                          )}
                           style={{ width: "46px" }}
+                          onClick={() => canOverride && onCellClick(emp, sundayRec, day.dateStr, true)}
                         >
-                          <span className="text-[9px] font-bold text-slate-400">OFF</span>
+                          {sundayRec ? (
+                            <div className={cn(
+                              "relative inline-flex items-center justify-center mx-auto",
+                              "w-9 h-7 rounded-md font-extrabold text-[10px] transition-all",
+                              CELL[sundayRec.effectiveStatus]?.bg ?? "bg-slate-800",
+                              CELL[sundayRec.effectiveStatus]?.text ?? "text-slate-400",
+                              canOverride && "group-hover:scale-110 group-hover:shadow-md"
+                            )}>
+                              {CELL[sundayRec.effectiveStatus]?.abbr ?? "·"}
+                              {sundayRec.isOverridden && (
+                                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-orange-400 border border-white" />
+                              )}
+                            </div>
+                          ) : (
+                            <span className={cn(
+                              "text-[9px] font-bold text-slate-400 transition-colors",
+                              canOverride && "group-hover:text-slate-600"
+                            )}>OFF</span>
+                          )}
                         </td>
                       )
                     }
@@ -1160,12 +1204,22 @@ function AttendanceGrid({
                         <td
                           key={day.dateStr}
                           className={cn(
-                            "border-r border-border text-center py-2",
-                            day.isSaturday ? "bg-slate-50" : ""
+                            "border-r border-border text-center py-2 group relative",
+                            day.isSaturday ? "bg-slate-50" : "",
+                            canOverride && "cursor-pointer hover:bg-[#F5F4F8]/80"
                           )}
                           style={{ width: "46px" }}
+                          onClick={() => canOverride && onCellClick(emp, null, day.dateStr, false)}
                         >
-                          <span className="text-slate-200 text-[10px]">—</span>
+                          <span className={cn(
+                            "text-slate-200 text-[10px] transition-colors",
+                            canOverride && "group-hover:text-slate-400"
+                          )}>—</span>
+                          {canOverride && (
+                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 z-50 bg-[#1e1b4b] text-white text-[9px] font-medium px-2 py-1 rounded-lg opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap">
+                              Click to mark
+                            </div>
+                          )}
                         </td>
                       )
                     }
@@ -1189,7 +1243,7 @@ function AttendanceGrid({
                           canOverride && "cursor-pointer hover:bg-[#F5F4F8]/80"
                         )}
                         style={{ width: "46px" }}
-                        onClick={() => canOverride && onCellClick(emp, rec)}
+                        onClick={() => canOverride && onCellClick(emp, rec, day.dateStr, false)}
                       >
                         {/* Status badge */}
                         <div className={cn(
