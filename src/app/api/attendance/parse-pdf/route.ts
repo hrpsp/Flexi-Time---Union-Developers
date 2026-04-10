@@ -53,19 +53,13 @@ export async function POST(req: Request) {
 }
 
 async function parseCrystalReportPdf(buffer: Buffer): Promise<ParseResult> {
-  // pdfjs-dist v4.x Node.js serverless usage — disable web worker entirely
+  // pdfjs-dist v3.x — legacy build for Node.js/Vercel serverless
+  // In v3, setting workerSrc="" disables the web worker and runs pdfjs inline
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs" as any) as typeof import("pdfjs-dist")
-  // In Node.js / Vercel serverless, there is no worker thread support for pdfjs.
-  // Setting workerSrc to a dummy string prevents the "No workerSrc specified" error,
-  // and passing disableWorker:true makes pdfjs run synchronously in the main thread.
-  pdfjs.GlobalWorkerOptions.workerSrc = "dummy"
+  pdfjs.GlobalWorkerOptions.workerSrc = ""
 
-  const pdf = await pdfjs.getDocument({
-    data: new Uint8Array(buffer),
-    useWorkerFetch: false,
-    isEvalSupported: false,
-    useSystemFonts: true,
-  }).promise
+  const pdf = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise
 
   const allItems: PdfTextItem[] = []
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
