@@ -50,6 +50,7 @@ export interface ShiftInfo {
 
 interface RecordRow {
   id:               string
+  periodId:         string   // needed when creating new records
   date:             string
   inTime:           string | null
   outTime:          string | null
@@ -275,10 +276,13 @@ export function GridShell({
       const data = await res.json()
       if (!res.ok) { toast.error(data.error ?? "Failed to load records."); return }
 
-      const rows: EmployeeRow[] = (data.employees as Omit<EmployeeRow, "recordMap">[]).map((e) => ({
-        ...e,
-        recordMap: buildRecordMap(e.records),
-      }))
+      const rows: EmployeeRow[] = (data.employees as Omit<EmployeeRow, "recordMap">[]).map((e) => {
+        const records = (e.records as RecordRow[]).map((r) => ({
+          ...r,
+          periodId: period.id,  // inject so modal can create new records
+        }))
+        return { ...e, records, recordMap: buildRecordMap(records) }
+      })
       setEmployees(rows)
       setStats(data.stats ?? {})
     } catch {
@@ -338,6 +342,7 @@ export function GridShell({
     // Synthesise a placeholder record for cells with no DB row yet
     const target: RecordRow = rec ?? {
       id: "",                         // empty = new record, create on save
+      periodId: period.id,
       date: dateStr,
       inTime: null,
       outTime: null,
