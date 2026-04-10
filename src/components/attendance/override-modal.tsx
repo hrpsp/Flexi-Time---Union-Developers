@@ -14,7 +14,8 @@ export type LeaveType = "ANNUAL" | "SICK" | "CASUAL" | "EMERGENCY" | "UNPAID" | 
 
 export interface OverrideTarget {
   record: {
-    id:                string
+    id:                string   // "" = no DB row yet (new record)
+    periodId:          string   // needed to create new records
     date:              string
     inTime:            string | null
     outTime:           string | null
@@ -69,7 +70,7 @@ const OVERRIDE_STATUSES: Array<{
   { value: "LEAVE",       label: "Leave",        abbr: "L",  bg: "bg-blue-700",    text: "text-white" },
   { value: "MISSING_IN",  label: "Missing In",   abbr: "MI", bg: "bg-violet-700",  text: "text-white" },
   { value: "MISSING_OUT", label: "Missing Out",  abbr: "MO", bg: "bg-fuchsia-700", text: "text-white" },
-  { value: "OFF",         label: "Off / Holiday",abbr: "·",  bg: "bg-slate-800",   text: "text-white" },
+  { value: "OFF",         label: "Off / Holiday",abbr: "\xb7",  bg: "bg-slate-800",   text: "text-white" },
   { value: "UNMARKED",    label: "Unmarked",     abbr: "?",  bg: "bg-slate-500",   text: "text-white" },
 ]
 
@@ -88,7 +89,6 @@ const CALC_STATUS_LABEL: Record<string, string> = {
   LEAVE: "Leave", UNMARKED: "Unmarked", OFF: "Off / Holiday",
 }
 
-// Validate HH:MM
 function isValidTime(t: string) {
   return /^([01]\d|2[0-3]):[0-5]\d$/.test(t.trim())
 }
@@ -101,14 +101,11 @@ export function OverrideModal({ target, open, onClose, onSaved }: OverrideModalP
   const [leaveType, setLeaveType]           = useState<LeaveType | null>(null)
   const [note, setNote]                     = useState("")
   const [saving, setSaving]                 = useState(false)
+  const [editingTime, setEditingTime]       = useState(false)
+  const [inTimeVal, setInTimeVal]           = useState("")
+  const [outTimeVal, setOutTimeVal]         = useState("")
+  const [timeError, setTimeError]           = useState("")
 
-  // Editable time fields
-  const [editingTime, setEditingTime] = useState(false)
-  const [inTimeVal, setInTimeVal]     = useState("")
-  const [outTimeVal, setOutTimeVal]   = useState("")
-  const [timeError, setTimeError]     = useState("")
-
-  // Sync state with target
   useEffect(() => {
     if (target && open) {
       setSelectedStatus((target.record.overriddenStatus as AttendanceStatusCode) ?? null)
@@ -116,13 +113,14 @@ export function OverrideModal({ target, open, onClose, onSaved }: OverrideModalP
       setNote(target.record.note ?? "")
       setInTimeVal(target.record.inTime ?? "")
       setOutTimeVal(target.record.outTime ?? "")
-      setEditingTime(false)
+      setEditingTime(!target.record.id) // auto-open time edit for new records
       setTimeError("")
     }
   }, [target, open])
 
   if (!open || !target) return null
   const { record, employee } = target
+  const isNewRecord = !record.id
 
   function fmtDisplayDate(dateStr: string) {
     try {
@@ -132,7 +130,6 @@ export function OverrideModal({ target, open, onClose, onSaved }: OverrideModalP
     } catch { return dateStr }
   }
 
-  // Compute preview of worked minutes from editable fields
   function computeWorked(inT: string, outT: string): number | null {
     if (!inT || !outT) return null
     const [ih, im] = inT.split(":").map(Number)
@@ -165,13 +162,47 @@ export function OverrideModal({ target, open, onClose, onSaved }: OverrideModalP
 
     setSaving(true)
     try {
+      let savedRecord: Record<string, unknown>
+
+      if (isNewRecord) {
+        // No DB row yet — use bulk-override to create it (emptyOnly:false, single date)
+        const res = await fetch("/api/attendance/bulk-override", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            employeeIds: [employee.id],
+            periodId: record.periodId,
+            status: selectedStatus ?? "PRESENT",
+            leaveType: selectedStatus === "LEAVE" ? leaveType : null,
+            note: note || null,
+            dates: [record.date],
+            emptyOnly: false,
+          }),
+        })
+        const data = await res.json()
+        if (!res.ok) { toast.error(data.error ?? "Failed to create record."); return }
+        // Bulk override doesn't return the record — pass empty string ID to trigger grid refresh
+        onSaved("", {
+          overriddenStatus: selectedStatus,
+          leaveType: selectedStatus === "LEAVE" ? leaveType : null,
+          note: note || null,
+          isOverridden: true,
+          effectiveStatus: selectedStatus ?? "PRESENT",
+          inTime: editingTime ? (inTimeVal || null) : null,
+          outTime: editingTime ? (outTimeVal || null) : null,
+          workedMinutes: editingTime ? computeWorked(inTimeVal, outTimeVal) : null,
+        })
+        toast.success("Attendance record created.")
+        onClose()
+        return
+      }
+
+      // Existing record — PATCH
       const body: Record<string, unknown> = {
         overriddenStatus: selectedStatus ?? null,
         leaveType: selectedStatus === "LEAVE" ? leaveType : null,
         note: note || null,
       }
-
-      // Include time overrides only when editing times
       if (editingTime) {
         body.inTime  = inTimeVal  || null
         body.outTime = outTimeVal || null
@@ -184,16 +215,17 @@ export function OverrideModal({ target, open, onClose, onSaved }: OverrideModalP
       })
       const data = await res.json()
       if (!res.ok) { toast.error(data.error ?? "Failed to save override."); return }
+      savedRecord = data.record as Record<string, unknown>
 
       onSaved(record.id, {
-        overriddenStatus: data.record.overriddenStatus,
-        leaveType:        data.record.leaveType,
-        note:             data.record.note,
-        isOverridden:     data.record.isOverridden,
-        effectiveStatus:  data.record.effectiveStatus,
-        inTime:           data.record.inTime,
-        outTime:          data.record.outTime,
-        workedMinutes:    data.record.workedMinutes,
+        overriddenStatus: savedRecord.overriddenStatus as string | null,
+        leaveType:        savedRecord.leaveType as string | null,
+        note:             savedRecord.note as string | null,
+        isOverridden:     !!savedRecord.isOverridden,
+        effectiveStatus:  savedRecord.effectiveStatus as string,
+        inTime:           savedRecord.inTime as string | null,
+        outTime:          savedRecord.outTime as string | null,
+        workedMinutes:    savedRecord.workedMinutes as number | null,
       })
       toast.success("Override saved.")
       onClose()
@@ -205,6 +237,7 @@ export function OverrideModal({ target, open, onClose, onSaved }: OverrideModalP
   }
 
   async function handleClearOverride() {
+    if (isNewRecord) return
     setSaving(true)
     try {
       const res  = await fetch(`/api/attendance/records/${record.id}`, {
@@ -214,18 +247,18 @@ export function OverrideModal({ target, open, onClose, onSaved }: OverrideModalP
       })
       const data = await res.json()
       if (!res.ok) { toast.error(data.error ?? "Failed to clear override."); return }
-
+      const r = data.record as Record<string, unknown>
       onSaved(record.id, {
         overriddenStatus: null,
         leaveType:        null,
-        note:             data.record.note,
+        note:             r.note as string | null,
         isOverridden:     false,
-        effectiveStatus:  data.record.effectiveStatus,
-        inTime:           data.record.inTime,
-        outTime:          data.record.outTime,
-        workedMinutes:    data.record.workedMinutes,
+        effectiveStatus:  r.effectiveStatus as string,
+        inTime:           r.inTime as string | null,
+        outTime:          r.outTime as string | null,
+        workedMinutes:    r.workedMinutes as number | null,
       })
-      toast.success("Override cleared — reverted to system status.")
+      toast.success("Override cleared.")
       onClose()
     } catch {
       toast.error("Network error. Please try again.")
@@ -247,24 +280,22 @@ export function OverrideModal({ target, open, onClose, onSaved }: OverrideModalP
         <div className="flex items-center justify-between px-5 py-4 border-b border-border">
           <div>
             <h2 className="text-sm font-extrabold text-[#322E53] leading-tight">
-              Override Attendance
+              {isNewRecord ? "Create Attendance Record" : "Override Attendance"}
             </h2>
             <p className="text-xs text-muted-foreground font-medium mt-0.5">
-              {employee.name} · {fmtDisplayDate(record.date)}
+              {employee.name} \xb7 {fmtDisplayDate(record.date)}
+              {isNewRecord && <span className="ml-2 text-[10px] bg-amber-100 text-amber-700 font-bold px-1.5 py-0.5 rounded-full">New Record</span>}
             </p>
           </div>
-          <button
-            onClick={onClose}
-            disabled={saving}
-            className="w-8 h-8 rounded-lg hover:bg-[#F5F4F8] flex items-center justify-center text-muted-foreground transition-colors disabled:opacity-50"
-          >
+          <button onClick={onClose} disabled={saving}
+            className="w-8 h-8 rounded-lg hover:bg-[#F5F4F8] flex items-center justify-center text-muted-foreground transition-colors disabled:opacity-50">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         <div className="p-5 space-y-4">
 
-          {/* ── Biometric / Time card ──────────────────────────────── */}
+          {/* Time card */}
           <div className="rounded-xl bg-[#F5F4F8] border border-border p-3.5">
             <div className="flex items-center justify-between mb-2.5">
               <div className="flex items-center gap-2">
@@ -273,193 +304,133 @@ export function OverrideModal({ target, open, onClose, onSaved }: OverrideModalP
                   {editingTime ? "Edit Times" : "Biometric Data"}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={() => { setEditingTime((v) => !v); setTimeError("") }}
-                className={cn(
-                  "flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold transition-colors",
-                  editingTime
-                    ? "bg-[#322E53] text-white"
-                    : "border border-border text-[#322E53] hover:bg-white"
-                )}
-              >
-                <Edit3 className="w-3 h-3" />
-                {editingTime ? "Editing" : "Edit Times"}
-              </button>
+              {!isNewRecord && (
+                <button type="button"
+                  onClick={() => { setEditingTime((v) => !v); setTimeError("") }}
+                  className={cn(
+                    "flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold transition-colors",
+                    editingTime ? "bg-[#322E53] text-white" : "border border-border text-[#322E53] hover:bg-white"
+                  )}>
+                  <Edit3 className="w-3 h-3" />
+                  {editingTime ? "Editing" : "Edit Times"}
+                </button>
+              )}
             </div>
 
-            {editingTime ? (
-              /* Editable time inputs */
+            {editingTime || isNewRecord ? (
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground mb-1">
-                    In Time (HH:MM)
-                  </p>
-                  <input
-                    type="text"
-                    value={inTimeVal}
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground mb-1">In Time (HH:MM)</p>
+                  <input type="text" value={inTimeVal}
                     onChange={(e) => { setInTimeVal(e.target.value); setTimeError("") }}
-                    placeholder="09:00"
-                    maxLength={5}
-                    className={cn(
-                      "w-full px-2.5 py-2 rounded-lg border text-sm font-mono font-bold text-[#322E53] focus:outline-none focus:ring-2 focus:ring-[#322E53]/20",
-                      timeError ? "border-red-400 bg-red-50" : "border-border bg-white"
-                    )}
-                  />
+                    placeholder="09:00" maxLength={5}
+                    className={cn("w-full px-2.5 py-2 rounded-lg border text-sm font-mono font-bold text-[#322E53] focus:outline-none focus:ring-2 focus:ring-[#322E53]/20",
+                      timeError ? "border-red-400 bg-red-50" : "border-border bg-white")} />
                 </div>
                 <div>
-                  <p className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground mb-1">
-                    Out Time (HH:MM)
-                  </p>
-                  <input
-                    type="text"
-                    value={outTimeVal}
+                  <p className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Out Time (HH:MM)</p>
+                  <input type="text" value={outTimeVal}
                     onChange={(e) => { setOutTimeVal(e.target.value); setTimeError("") }}
-                    placeholder="17:00"
-                    maxLength={5}
-                    className={cn(
-                      "w-full px-2.5 py-2 rounded-lg border text-sm font-mono font-bold text-[#322E53] focus:outline-none focus:ring-2 focus:ring-[#322E53]/20",
-                      timeError ? "border-red-400 bg-red-50" : "border-border bg-white"
-                    )}
-                  />
+                    placeholder="17:00" maxLength={5}
+                    className={cn("w-full px-2.5 py-2 rounded-lg border text-sm font-mono font-bold text-[#322E53] focus:outline-none focus:ring-2 focus:ring-[#322E53]/20",
+                      timeError ? "border-red-400 bg-red-50" : "border-border bg-white")} />
                 </div>
                 {previewWorked !== null && (
                   <div className="col-span-2 flex items-center gap-1.5 text-[10px] text-emerald-700 font-bold">
-                    <Clock className="w-3 h-3" />
-                    Worked: {fmtWorked(previewWorked)}
+                    <Clock className="w-3 h-3" /> Worked: {fmtWorked(previewWorked)}
                   </div>
                 )}
-                {timeError && (
-                  <p className="col-span-2 text-[10px] text-red-500 font-semibold">{timeError}</p>
-                )}
+                {timeError && <p className="col-span-2 text-[10px] text-red-500 font-semibold">{timeError}</p>}
               </div>
             ) : (
-              /* Read-only biometric display */
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <p className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">In Time</p>
-                  <p className="text-sm font-extrabold text-[#322E53] font-mono">{record.inTime ?? "—"}</p>
+                  <p className="text-sm font-extrabold text-[#322E53] font-mono">{record.inTime ?? "\u2014"}</p>
                 </div>
                 <div>
                   <p className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Out Time</p>
-                  <p className="text-sm font-extrabold text-[#322E53] font-mono">{record.outTime ?? "—"}</p>
+                  <p className="text-sm font-extrabold text-[#322E53] font-mono">{record.outTime ?? "\u2014"}</p>
                 </div>
                 <div>
                   <p className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Worked</p>
-                  <p className="text-sm font-extrabold text-[#322E53]">
-                    {fmtWorked(record.workedMinutes ?? 0)}
-                  </p>
+                  <p className="text-sm font-extrabold text-[#322E53]">{fmtWorked(record.workedMinutes ?? 0)}</p>
                 </div>
               </div>
             )}
 
-            <div className="mt-2.5 pt-2.5 border-t border-border flex items-center justify-between">
-              <span className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">
-                System Status
-              </span>
-              <span className="text-xs font-bold text-[#322E53]">
-                {CALC_STATUS_LABEL[record.calculatedStatus] ?? record.calculatedStatus}
-              </span>
-            </div>
+            {!isNewRecord && (
+              <div className="mt-2.5 pt-2.5 border-t border-border flex items-center justify-between">
+                <span className="text-[9px] font-bold uppercase tracking-wider text-muted-foreground">System Status</span>
+                <span className="text-xs font-bold text-[#322E53]">
+                  {CALC_STATUS_LABEL[record.calculatedStatus] ?? record.calculatedStatus}
+                </span>
+              </div>
+            )}
           </div>
 
-          {/* ── Status picker ──────────────────────────────────────── */}
+          {/* Status picker */}
           <div>
             <p className="text-xs font-bold uppercase tracking-wider text-[#49426E] mb-2">
-              Override Status
+              {isNewRecord ? "Set Status" : "Override Status"}
             </p>
             <div className="grid grid-cols-4 gap-1.5">
               {OVERRIDE_STATUSES.map((s) => (
-                <button
-                  key={s.value}
-                  type="button"
+                <button key={s.value} type="button"
                   onClick={() => setSelectedStatus(selectedStatus === s.value ? null : s.value)}
                   className={cn(
                     "flex flex-col items-center gap-0.5 py-2 px-1 rounded-xl border-2 transition-all",
                     selectedStatus === s.value
                       ? `${s.bg} ${s.text} border-transparent shadow-md scale-[1.03]`
                       : "border-border hover:border-[#322E53]/30 hover:bg-[#F5F4F8]"
-                  )}
-                >
-                  <span className={cn(
-                    "text-[11px] font-extrabold leading-none",
-                    selectedStatus === s.value ? s.text : "text-[#322E53]"
                   )}>
-                    {s.abbr}
-                  </span>
-                  <span className={cn(
-                    "text-[8px] font-semibold leading-tight text-center",
-                    selectedStatus === s.value ? "text-white/80" : "text-muted-foreground"
-                  )}>
-                    {s.label}
-                  </span>
+                  <span className={cn("text-[11px] font-extrabold leading-none", selectedStatus === s.value ? s.text : "text-[#322E53]")}>{s.abbr}</span>
+                  <span className={cn("text-[8px] font-semibold leading-tight text-center", selectedStatus === s.value ? "text-white/80" : "text-muted-foreground")}>{s.label}</span>
                 </button>
               ))}
             </div>
           </div>
 
-          {/* ── Leave type ─────────────────────────────────────────── */}
+          {/* Leave type */}
           {selectedStatus === "LEAVE" && (
             <div>
-              <p className="text-xs font-bold uppercase tracking-wider text-[#49426E] mb-1.5">
-                Leave Type
-              </p>
-              <select
-                value={leaveType ?? ""}
-                onChange={(e) => setLeaveType((e.target.value as LeaveType) || null)}
-                className="w-full px-3.5 py-2.5 rounded-lg border border-border bg-brand-bg text-sm font-medium text-brand-purple focus:outline-none focus:ring-2 focus:ring-brand-purple/20 focus:border-brand-purple transition-colors"
-              >
-                <option value="">Select leave type…</option>
-                {LEAVE_TYPE_OPTIONS.map((lt) => (
-                  <option key={lt.value} value={lt.value}>{lt.label}</option>
-                ))}
+              <p className="text-xs font-bold uppercase tracking-wider text-[#49426E] mb-1.5">Leave Type</p>
+              <select value={leaveType ?? ""} onChange={(e) => setLeaveType((e.target.value as LeaveType) || null)}
+                className="w-full px-3.5 py-2.5 rounded-lg border border-border bg-brand-bg text-sm font-medium text-brand-purple focus:outline-none focus:ring-2 focus:ring-brand-purple/20 transition-colors">
+                <option value="">Select leave type\u2026</option>
+                {LEAVE_TYPE_OPTIONS.map((lt) => <option key={lt.value} value={lt.value}>{lt.label}</option>)}
               </select>
             </div>
           )}
 
-          {/* ── Note ───────────────────────────────────────────────── */}
+          {/* Note */}
           <div>
             <p className="text-xs font-bold uppercase tracking-wider text-[#49426E] mb-1.5">
               Note <span className="normal-case font-normal text-muted-foreground">(optional)</span>
             </p>
-            <textarea
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              placeholder="Reason for override…"
-              rows={2}
-              maxLength={500}
-              className="w-full px-3.5 py-2.5 rounded-lg border border-border bg-brand-bg text-sm font-medium text-brand-purple placeholder-slate-400 resize-none focus:outline-none focus:ring-2 focus:ring-brand-purple/20 focus:border-brand-purple transition-colors"
-            />
+            <textarea value={note} onChange={(e) => setNote(e.target.value)}
+              placeholder="Reason for override\u2026" rows={2} maxLength={500}
+              className="w-full px-3.5 py-2.5 rounded-lg border border-border bg-brand-bg text-sm font-medium text-brand-purple placeholder-slate-400 resize-none focus:outline-none focus:ring-2 focus:ring-brand-purple/20 transition-colors" />
           </div>
         </div>
 
         {/* Footer */}
         <div className="flex items-center gap-2.5 px-5 pb-5">
-          {record.isOverridden && (
-            <button
-              onClick={handleClearOverride}
-              disabled={saving}
-              className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-border text-xs font-semibold text-muted-foreground hover:bg-[#F5F4F8] hover:text-[#322E53] transition-colors disabled:opacity-50"
-            >
-              <RotateCcw className="w-3 h-3" />
-              Clear Override
+          {record.isOverridden && !isNewRecord && (
+            <button onClick={handleClearOverride} disabled={saving}
+              className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-border text-xs font-semibold text-muted-foreground hover:bg-[#F5F4F8] hover:text-[#322E53] transition-colors disabled:opacity-50">
+              <RotateCcw className="w-3 h-3" /> Clear Override
             </button>
           )}
           <div className="flex-1" />
-          <button
-            onClick={onClose}
-            disabled={saving}
-            className="px-4 py-2.5 rounded-xl border border-border text-sm font-semibold text-[#322E53] hover:bg-[#F5F4F8] transition-colors disabled:opacity-50"
-          >
+          <button onClick={onClose} disabled={saving}
+            className="px-4 py-2.5 rounded-xl border border-border text-sm font-semibold text-[#322E53] hover:bg-[#F5F4F8] transition-colors disabled:opacity-50">
             Cancel
           </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || !canSave}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#322E53] hover:bg-[#49426E] text-white text-sm font-bold transition-colors disabled:opacity-50"
-          >
+          <button onClick={handleSave} disabled={saving || !canSave}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#322E53] hover:bg-[#49426E] text-white text-sm font-bold transition-colors disabled:opacity-50">
             {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-            Save Override
+            {isNewRecord ? "Create Record" : "Save Override"}
           </button>
         </div>
       </div>
